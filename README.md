@@ -186,8 +186,10 @@ Then prefer `./launch_trading_day.sh` closer to open (stricter 50 ms preflight
 ## Streamlit terminal
 
 ```bash
-# Via PM2 (preferred with launch script)
-# or manually:
+# EC2 worker telemetry (health · positions · emergency square-off)
+streamlit run dashboard/app.py
+
+# Full multi-agent Trade Console (preferred with launch / PM2)
 streamlit run dashboard/Trade_Console.py
 ```
 
@@ -246,6 +248,7 @@ python services/clock_sync.py
 python main.py --tokens "$TRADE_TOKENS" --broker zerodha
 
 python -m unittest tests.test_auth tests.test_security tests.test_mock_execution -v
+streamlit run dashboard/app.py
 streamlit run dashboard/Trade_Console.py
 python services/parquet_exporter.py --date YYYY-MM-DD --symbol NIFTY
 ```

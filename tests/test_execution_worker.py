@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 # Ensure secret before app import path resolves auth
 os.environ["INTERNAL_AUTH_SECRET"] = "test-secret-token"
 os.environ["EC2_STATIC_IP"] = "203.0.113.10"
+os.environ["PAPER_TRADING"] = "true"
+os.environ.setdefault("BROKER_NAME", "dhan")
 
 from execution_worker.main import app  # noqa: E402
 

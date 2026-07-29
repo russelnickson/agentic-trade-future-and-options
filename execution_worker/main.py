@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import signal
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Literal
@@ -13,9 +12,7 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 
-# ---------------------------------------------------------------------------
-# In-memory mock broker (swap for Dhan/Zerodha clients later)
-# ---------------------------------------------------------------------------
+from execution_worker import broker_adapter
 
 Action = Literal["BUY", "SELL"]
 OrderType = Literal["MARKET", "LIMIT", "SL", "SL-M"]
@@ -26,6 +23,8 @@ class PlaceOrderRequest(BaseModel):
     action: Action
     qty: int = Field(..., gt=0)
     order_type: OrderType = "LIMIT"
+    exchange: str = Field(default="NFO", min_length=1, max_length=32)
+    price: float = Field(default=0.0, ge=0.0)
 
     @field_validator("symbol")
     @classmethod
@@ -35,54 +34,12 @@ class PlaceOrderRequest(BaseModel):
             raise ValueError("symbol is required")
         return cleaned
 
-
-class MockBroker:
-    """Thread-hostile but fine for single-worker uvicorn under PM2."""
-
-    def __init__(self) -> None:
-        self._orders: list[dict[str, Any]] = []
-        self._positions: dict[str, dict[str, Any]] = {}
-
-    def place(self, payload: PlaceOrderRequest) -> dict[str, Any]:
-        order_id = f"MOCK-{uuid.uuid4().hex[:12].upper()}"
-        now = datetime.now(timezone.utc).isoformat()
-        order = {
-            "order_id": order_id,
-            "symbol": payload.symbol,
-            "action": payload.action,
-            "qty": payload.qty,
-            "order_type": payload.order_type,
-            "status": "FILLED",
-            "broker": "mock",
-            "created_at": now,
-        }
-        self._orders.append(order)
-
-        key = payload.symbol
-        pos = self._positions.get(key)
-        signed = payload.qty if payload.action == "BUY" else -payload.qty
-        if pos is None:
-            self._positions[key] = {
-                "symbol": key,
-                "qty": signed,
-                "avg_price": 0.0,
-                "updated_at": now,
-            }
-        else:
-            new_qty = int(pos["qty"]) + signed
-            if new_qty == 0:
-                del self._positions[key]
-            else:
-                pos["qty"] = new_qty
-                pos["updated_at"] = now
-
-        return order
-
-    def positions(self) -> list[dict[str, Any]]:
-        return list(self._positions.values())
+    @field_validator("exchange")
+    @classmethod
+    def _strip_exchange(cls, value: str) -> str:
+        return value.strip().upper() or "NFO"
 
 
-broker = MockBroker()
 http_client: httpx.AsyncClient | None = None
 
 
@@ -119,7 +76,6 @@ def _install_signal_handlers(app: FastAPI) -> None:
         try:
             signal.signal(sig, _handle)
         except (ValueError, OSError):
-            # Not main thread / unsupported — lifespan still closes the pool.
             pass
 
 
@@ -128,6 +84,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.shutting_down = False
     app.state.last_signal = None
     app.state.started_at = datetime.now(timezone.utc).isoformat()
+    app.state.broker = broker_adapter.adapter_status()
 
     global http_client
     http_client = httpx.AsyncClient(
@@ -151,7 +108,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="F&O Execution Worker",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -172,16 +129,51 @@ async def health(request: Request) -> dict[str, Any]:
         "host_header": host,
         "last_signal": getattr(request.app.state, "last_signal", None),
         "http_pool_ready": http_client is not None and not http_client.is_closed,
+        "broker": broker_adapter.adapter_status(),
     }
 
 
 @app.post("/order/place", dependencies=[Depends(require_auth_token)])
 async def place_order(body: PlaceOrderRequest) -> dict[str, Any]:
-    order = broker.place(body)
+    try:
+        order = broker_adapter.place_order(
+            symbol=body.symbol,
+            exchange=body.exchange,
+            qty=body.qty,
+            transaction_type=body.action,
+            order_type=body.order_type,
+            price=body.price,
+        )
+    except broker_adapter.BrokerAdapterError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return {"ok": True, "order": order}
 
 
 @app.get("/order/positions", dependencies=[Depends(require_auth_token)])
 async def get_positions() -> dict[str, Any]:
-    rows = broker.positions()
+    try:
+        rows = broker_adapter.get_positions()
+    except broker_adapter.BrokerAdapterError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return {"ok": True, "count": len(rows), "positions": rows}
+
+
+@app.post("/order/cancel", dependencies=[Depends(require_auth_token)])
+async def cancel_order(payload: dict[str, Any]) -> dict[str, Any]:
+    order_id = str(payload.get("order_id") or "").strip()
+    if not order_id:
+        raise HTTPException(status_code=400, detail="order_id is required")
+    try:
+        result = broker_adapter.cancel_order(order_id)
+    except broker_adapter.BrokerAdapterError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return result
+
+
+@app.post("/order/square_off_all", dependencies=[Depends(require_auth_token)])
+async def square_off_all() -> dict[str, Any]:
+    """Emergency flatten — close all open positions immediately."""
+    try:
+        return broker_adapter.square_off_all()
+    except broker_adapter.BrokerAdapterError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

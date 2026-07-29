@@ -146,6 +146,22 @@ class RemoteClient:
         resp.raise_for_status()
         return resp.json()
 
+    def square_off_all(self) -> dict[str, Any]:
+        """Emergency flatten on the remote worker."""
+        resp = self._request("POST", "/order/square_off_all")
+        resp.raise_for_status()
+        return resp.json()
+
+    def health_payload(self) -> dict[str, Any] | None:
+        """Return /health JSON or None if unreachable."""
+        try:
+            resp = self._http.get("/health", timeout=_TIMEOUT)
+            if resp.status_code != 200:
+                return None
+            return resp.json()
+        except Exception:
+            return None
+
 
 _default_client: RemoteClient | None = None
 
@@ -164,8 +180,10 @@ def send_order(
     qty: int,
     order_type: str = "LIMIT",
 ) -> dict[str, Any]:
-    """Convenience — send via the default client."""
-    return get_client().send_order(symbol, action, qty, order_type)
+    """Dispatch via LangGraph strategy gate — raw signals cannot bypass risk."""
+    from local_app.strategy.pipeline import execute_signal
+
+    return execute_signal(symbol, action, qty, order_type)
 
 
 def check_health() -> bool:

@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 
 os.environ.setdefault("INTERNAL_AUTH_SECRET", "test-secret-token")
 os.environ.setdefault("EC2_STATIC_IP", "203.0.113.10")
+os.environ["PAPER_TRADING"] = "true"
+os.environ.setdefault("BROKER_NAME", "dhan")
 
 from execution_worker.main import app  # noqa: E402
 
@@ -55,6 +57,7 @@ def test_valid_order_placement(client: TestClient) -> None:
     body = response.json()
     assert body["ok"] is True
     assert body["order"]["symbol"] == "NIFTY24500CE"
-    assert body["order"]["action"] == "BUY"
+    assert body["order"]["transaction_type"] == "BUY"
     assert body["order"]["qty"] == 65
     assert body["order"]["status"] == "FILLED"
+    assert body["order"]["paper_trading"] is True
