@@ -52,9 +52,9 @@ Repo → **Settings → Secrets and variables → Actions**:
 |--------|--------|
 | `AWS_ACCESS_KEY_ID` | `AKIA…` (no quotes / spaces / newlines) |
 | `AWS_SECRET_ACCESS_KEY` | Secret key string (no quotes / newlines) |
-| `EC2_HOST` | Elastic IP of the EC2 instance |
+| `EC2_HOST` | Public IP / Elastic IP (current: `13.207.36.246`) |
 | `EC2_USERNAME` | `ubuntu` |
-| `EC2_SSH_KEY` | Full PEM of `fno-ec2-key.pem` including `BEGIN` / `END` lines |
+| `EC2_SSH_KEY` | Full PEM of the instance key (`fno-ec2-key-rsa.pem`) including `BEGIN` / `END` lines |
 
 You can remove the unused `AWS_ROLE_ARN` secret if it remains from the old OIDC setup.
 
