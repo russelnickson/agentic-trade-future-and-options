@@ -113,61 +113,65 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           echo "EC2 SSH secrets OK (host=${HOST}, user=${USER})"
 
-      - name: Deploy to EC2 over SSH
-        uses: appleboy/ssh-action@v1.0.0
+      - name: Deploy to EC2 (rsync + remote install)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          host: ${{ steps.ec2.outputs.host }}
-          username: ${{ steps.ec2.outputs.username }}
-          key: ${{ steps.ec2.outputs.key }}
-          envs: GITHUB_TOKEN
-          script_stop: true
-          command_timeout: 20m
-          script: |
-            set -euo pipefail
-            APP_DIR="/home/ubuntu/app"
-            REPO_HTTPS="https://x-access-token:${GITHUB_TOKEN}@github.com/russelnickson/agentic-trade-future-and-options.git"
+          EC2_HOST: ${{ steps.ec2.outputs.host }}
+          EC2_USERNAME: ${{ steps.ec2.outputs.username }}
+          EC2_SSH_KEY: ${{ steps.ec2.outputs.key }}
+        run: |
+          set -euo pipefail
+          KEY_FILE="${RUNNER_TEMP}/fno-ec2-key.pem"
+          printf '%s\n' "${EC2_SSH_KEY}" > "${KEY_FILE}"
+          chmod 600 "${KEY_FILE}"
+          SSH=(ssh -i "${KEY_FILE}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30)
+          RSYNC_SSH="ssh -i ${KEY_FILE} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30"
+          APP_DIR="/home/ubuntu/app"
+          REMOTE="${EC2_USERNAME}@${EC2_HOST}"
 
-            echo "==> bootstrap packages"
-            sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-              python3 python3-pip python3-venv git curl
-            if ! command -v node >/dev/null 2>&1; then
-              curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-            fi
-            if ! command -v pm2 >/dev/null 2>&1; then
-              sudo npm install -g pm2
-            fi
+          echo "==> bootstrap packages on ${REMOTE}"
+          "${SSH[@]}" "${REMOTE}" bash -s <<'REMOTE_BOOTSTRAP'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          # apt needrestart chatter on stderr is normal — ignore labels from CI log viewers
+          sudo apt-get update -y
+          sudo apt-get install -y python3 python3-pip python3-venv git curl rsync
+          if ! command -v node >/dev/null 2>&1; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+          fi
+          if ! command -v pm2 >/dev/null 2>&1; then
+            sudo npm install -g pm2
+          fi
+          mkdir -p /home/ubuntu/app
+          REMOTE_BOOTSTRAP
 
-            echo "==> sync repo into ${APP_DIR}"
-            mkdir -p "$(dirname "$APP_DIR")"
-            if [ -d "$APP_DIR/.git" ]; then
-              cd "$APP_DIR"
-              git remote set-url origin "$REPO_HTTPS"
-              git fetch origin main
-              git checkout main
-              git reset --hard origin/main
-            else
-              rm -rf "$APP_DIR"
-              git clone --branch main "$REPO_HTTPS" "$APP_DIR"
-              cd "$APP_DIR"
-            fi
-            # Drop token from remote URL so it is not stored on disk
-            git remote set-url origin "https://github.com/russelnickson/agentic-trade-future-and-options.git"
+          echo "==> rsync workspace -> ${REMOTE}:${APP_DIR}"
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude 'venv/' \
+            --exclude '__pycache__/' \
+            --exclude '*.pem' \
+            --exclude '.env' \
+            --exclude '.secrets.env' \
+            -e "${RSYNC_SSH}" \
+            ./ "${REMOTE}:${APP_DIR}/"
 
-            echo "==> python deps"
-            if [ ! -d venv ]; then
-              python3 -m venv venv
-            fi
-            # shellcheck disable=SC1091
-            source venv/bin/activate
-            pip install --upgrade pip
-            pip install -r requirements.txt
-
-            echo "==> pm2 worker"
-            pm2 restart fno-worker || pm2 start "venv/bin/uvicorn execution_worker.main:app --host 0.0.0.0 --port 8000" --name "fno-worker" --cwd "$APP_DIR"
-            pm2 save
-            pm2 status
-            echo "==> deploy OK"
+          echo "==> install deps + pm2 on remote"
+          "${SSH[@]}" "${REMOTE}" bash -s <<'REMOTE_INSTALL'
+          set -euo pipefail
+          APP_DIR="/home/ubuntu/app"
+          cd "$APP_DIR"
+          if [ ! -d venv ]; then
+            python3 -m venv venv
+          fi
+          # shellcheck disable=SC1091
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pm2 delete fno-worker >/dev/null 2>&1 || true
+          pm2 start "venv/bin/uvicorn execution_worker.main:app --host 0.0.0.0 --port 8000" \
+            --name "fno-worker" --cwd "$APP_DIR"
+          pm2 save
+          pm2 status
+          echo "==> deploy OK"
+          REMOTE_INSTALL
