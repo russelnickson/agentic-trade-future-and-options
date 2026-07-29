@@ -40,7 +40,10 @@ jobs:
     name: deploy-to-aws-ec2
     needs: test-and-lint
     runs-on: ubuntu-latest
-    environment: production
+    # Do NOT set `environment:` here unless the IAM trust `sub` allows
+    # `repo:russelnickson/agentic-trade-future-and-options:environment:<name>`.
+    # With `environment: production`, GitHub issues a different OIDC subject than
+    # `ref:refs/heads/main` and AssumeRoleWithWebIdentity fails.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,6 +53,8 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ap-south-1
+          audience: sts.amazonaws.com
+          role-session-name: gha-fno-deploy
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity

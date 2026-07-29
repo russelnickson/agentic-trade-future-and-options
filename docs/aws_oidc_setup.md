@@ -54,9 +54,47 @@ Replace `<AWS_ACCOUNT_ID>` with your 12-digit account ID.
 
 - **Provider:** `token.actions.githubusercontent.com`
 - **Audience (`aud`):** `sts.amazonaws.com`
-- **Subject (`sub`):** `repo:russelnickson/agentic-trade-future-and-options:ref:refs/heads/main`
+- **Subject (`sub`):** must match what GitHub actually issues for the job
 
-Only workflows on **`main`** in this repo can assume the role.
+| Job config | Typical `sub` |
+|------------|----------------|
+| Push to `main`, **no** `environment:` | `repo:russelnickson/agentic-trade-future-and-options:ref:refs/heads/main` |
+| Job sets `environment: production` | `repo:russelnickson/agentic-trade-future-and-options:environment:production` |
+
+This repo’s deploy job intentionally **omits** `environment:` so the trust policy above works as written.
+
+If you later add `environment: production`, update the trust condition to:
+
+```json
+"StringLike": {
+  "token.actions.githubusercontent.com:sub": "repo:russelnickson/agentic-trade-future-and-options:environment:production"
+}
+```
+
+Or allow both with two statements / a broader pattern:
+
+```json
+"StringLike": {
+  "token.actions.githubusercontent.com:sub": [
+    "repo:russelnickson/agentic-trade-future-and-options:ref:refs/heads/main",
+    "repo:russelnickson/agentic-trade-future-and-options:environment:*"
+  ]
+}
+```
+
+### Common failure
+
+```text
+Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity
+```
+
+Checklist:
+
+1. IAM OIDC provider exists for `token.actions.githubusercontent.com` with audience `sts.amazonaws.com`.
+2. Role trust `Federated` ARN account ID matches the role account.
+3. Trust `sub` matches the job (see table — **environment vs ref**).
+4. Secret `AWS_ROLE_ARN` is the full role ARN (`arn:aws:iam::ACCOUNT:role/NAME`), no typos/spaces.
+5. Thumbprint on the OIDC provider is current (IAM usually manages this; recreate provider if stale).
 
 ---
 
