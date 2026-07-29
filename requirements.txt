@@ -2,8 +2,10 @@ dhanhq
 kiteconnect
 pyotp
 python-dotenv
+pydantic
 pydantic-settings
 requests
+httpx
 redis
 psycopg2-binary
 pyzmq
@@ -13,7 +15,8 @@ scipy
 py_vollib
 duckdb
 fastapi
-uvicorn
+uvicorn[standard]
+pytest
 ntplib
 streamlit
 yfinance>=1.0
