@@ -48,10 +48,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate AWS_ROLE_ARN
+        id: aws_role
+        env:
+          RAW_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          ARN="$(printf '%s' "${RAW_ARN}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//')"
+          if [[ -z "${ARN}" ]]; then
+            echo "::error::AWS_ROLE_ARN secret is empty"
+            exit 1
+          fi
+          if [[ ! "${ARN}" =~ ^arn:aws:iam::[0-9]{12}:role/.+ ]]; then
+            echo "::error::AWS_ROLE_ARN must be a full role ARN like arn:aws:iam::123456789012:role/github-actions-fno-deploy (got invalid format; check quotes/spaces/newlines in the secret)"
+            exit 1
+          fi
+          echo "arn=${ARN}" >> "${GITHUB_OUTPUT}"
+          echo "AWS_ROLE_ARN format OK (account …${ARN:13:4}… role suffix hidden)"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ steps.aws_role.outputs.arn }}
           aws-region: ap-south-1
           audience: sts.amazonaws.com
           role-session-name: gha-fno-deploy

@@ -23,7 +23,7 @@ After create, note the provider ARN (used implicitly when you attach the trust p
 
 ## 2. IAM role trust policy (OIDC)
 
-Create a role (e.g. `github-actions-fno-deploy`) with **Custom trust policy**:
+Create a role (e.g. `aws-ec2-deployment-runner`) with **Custom trust policy**:
 
 ```json
 {
@@ -32,7 +32,7 @@ Create a role (e.g. `github-actions-fno-deploy`) with **Custom trust policy**:
     {
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::<AWS_ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::960705222705:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
@@ -93,7 +93,16 @@ Checklist:
 1. IAM OIDC provider exists for `token.actions.githubusercontent.com` with audience `sts.amazonaws.com`.
 2. Role trust `Federated` ARN account ID matches the role account.
 3. Trust `sub` matches the job (see table — **environment vs ref**).
-4. Secret `AWS_ROLE_ARN` is the full role ARN (`arn:aws:iam::ACCOUNT:role/NAME`), no typos/spaces.
+4. Secret `AWS_ROLE_ARN` is the **full** role ARN only — no quotes, spaces, or newlines:
+
+   ```text
+   arn:aws:iam::960705222705:role/aws-ec2-deployment-runner
+   ```
+
+   Invalid examples that cause `Request ARN is invalid`:
+   - `github-actions-fno-deploy` (name only)
+   - `"arn:aws:iam::…:role/…"` (quoted)
+   - ARN with trailing newline/space pasted from the console
 5. Thumbprint on the OIDC provider is current (IAM usually manages this; recreate provider if stale).
 
 ---
@@ -173,7 +182,7 @@ Replace `<AWS_ACCOUNT_ID>` again. Tighten `ssm:SendCommand` / `ec2:Describe*` fu
 **Role ARN (example shape — copy from IAM after create):**
 
 ```text
-arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-fno-deploy
+arn:aws:iam::960705222705:role/aws-ec2-deployment-runner
 ```
 
 ---
