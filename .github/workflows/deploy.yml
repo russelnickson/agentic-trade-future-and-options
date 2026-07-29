@@ -154,6 +154,12 @@ jobs:
             --exclude '*.pem' \
             --exclude '.env' \
             --exclude '.secrets.env' \
+            --exclude 'data/history/' \
+            --exclude 'data/insights/' \
+            --exclude 'data/global/' \
+            --exclude 'data/live_market/' \
+            --exclude 'data/desk/' \
+            --exclude 'data/20*/' \
             -e "${RSYNC_SSH}" \
             ./ "${REMOTE}:${APP_DIR}/"
 
