@@ -61,10 +61,61 @@ def fetch_dhan_capital() -> CapitalSnapshot:
     from dhanhq import DhanContext, Funds
 
     settings = get_settings()
+    if not (settings.dhan_client_id and settings.dhan_access_token):
+        return CapitalSnapshot(
+            broker="dhan",
+            available_margin=0.0,
+            utilized_margin=0.0,
+            cash_balance=0.0,
+            collateral_value=0.0,
+            cash_ratio=None,
+            cash_rule_ok=None,
+            error="DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN missing — set them in Settings",
+        )
     try:
         ctx = DhanContext(settings.dhan_client_id, settings.dhan_access_token)
         response = Funds(ctx).get_fund_limits()
-        data = response.get("data", response) if isinstance(response, dict) else {}
+        if not isinstance(response, dict):
+            return CapitalSnapshot(
+                broker="dhan",
+                available_margin=0.0,
+                utilized_margin=0.0,
+                cash_balance=0.0,
+                collateral_value=0.0,
+                cash_ratio=None,
+                cash_rule_ok=None,
+                error=f"Unexpected fundlimit payload type: {type(response).__name__}",
+                raw={"data": response},
+            )
+
+        status = str(response.get("status") or "").lower()
+        data = response.get("data", response)
+        if status == "failure" or data in (None, "", []):
+            remarks = response.get("remarks") or {}
+            if isinstance(remarks, dict):
+                msg = (
+                    remarks.get("error_message")
+                    or remarks.get("errorMessage")
+                    or remarks.get("message")
+                    or str(remarks)
+                )
+                code = remarks.get("error_code") or remarks.get("errorCode") or ""
+            else:
+                msg = str(remarks or "fundlimit failed")
+                code = ""
+            detail = f"Dhan fundlimit failed{f' ({code})' if code else ''}: {msg}"
+            return CapitalSnapshot(
+                broker="dhan",
+                available_margin=0.0,
+                utilized_margin=0.0,
+                cash_balance=0.0,
+                collateral_value=0.0,
+                cash_ratio=None,
+                cash_rule_ok=None,
+                error=detail,
+                raw=response,
+            )
+
         if not isinstance(data, dict):
             data = {}
 
@@ -90,7 +141,7 @@ def fetch_dhan_capital() -> CapitalSnapshot:
             collateral_value=collateral,
             cash_ratio=ratio,
             cash_rule_ok=ok,
-            raw=response if isinstance(response, dict) else {"data": data},
+            raw=response,
         )
     except Exception as exc:
         logger.exception("Dhan capital fetch failed")
