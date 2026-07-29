@@ -112,10 +112,27 @@ dhan_v1, dhan_v2 = st.columns([1, 3])
 with dhan_v1:
     validate_dhan_btn = st.button("Validate Dhan", use_container_width=True)
 if validate_dhan_btn:
-    token_for_check = dhan_token or secrets.get("DHAN_ACCESS_TOKEN", "")
+    token_for_check = (dhan_token or secrets.get("DHAN_ACCESS_TOKEN", "")).strip()
     ok, msg = validate_dhan(dhan_client_id, token_for_check)
     if ok:
-        st.success(msg)
+        # Persist immediately — validating a pasted token without Save left
+        # .secrets.env on the old JWT and Capital showed ₹0 / DH-906.
+        path = save_local_secrets(
+            {
+                "TRADE_BROKER": "dhan",
+                "DHAN_CLIENT_ID": (dhan_client_id or "").strip(),
+                "DHAN_ACCESS_TOKEN": token_for_check,
+            }
+        )
+        try:
+            from config.settings import get_settings
+
+            get_settings.cache_clear()
+        except Exception:
+            pass
+        apply_secrets_to_environ()
+        st.success(f"{msg} — saved to `{path.name}`")
+        st.caption("Restart/refresh the Trade Console so capital cards reload.")
     else:
         st.error(msg)
 

@@ -194,14 +194,35 @@ def validate_dhan(client_id: str, access_token: str) -> tuple[bool, str]:
         profile = DhanLogin(client_id).user_profile(access_token)
         if not isinstance(profile, dict):
             return False, f"Unexpected response: {profile!r}"
+
+        status = str(profile.get("status") or "").lower()
+        if status == "failure":
+            remarks = profile.get("remarks") or {}
+            if isinstance(remarks, dict):
+                msg = (
+                    remarks.get("error_message")
+                    or remarks.get("errorMessage")
+                    or str(remarks)
+                )
+                code = remarks.get("error_code") or remarks.get("errorCode") or ""
+            else:
+                msg = str(remarks or "profile failed")
+                code = ""
+            detail = f"{msg}" if not code else f"{code}: {msg}"
+            return False, f"Dhan REST rejected token — {detail}"
+
         data = profile.get("data") if isinstance(profile.get("data"), dict) else {}
         identity = (
             profile.get("dhanClientId")
             or profile.get("clientId")
             or profile.get("client_id")
             or data.get("dhanClientId")
-            or "ok"
         )
+        if not identity:
+            # Some SDK builds return sparse success payloads; require a non-failure status.
+            if status and status not in {"success", "ok"}:
+                return False, f"Dhan REST ambiguous profile status={status!r}"
+            identity = client_id
         return True, f"Dhan REST OK — client={identity}"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
