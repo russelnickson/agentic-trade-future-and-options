@@ -1,248 +1,98 @@
-# AWS OIDC setup for GitHub Actions → EC2 (`ap-south-1`)
+# AWS access keys for GitHub Actions → EC2 (`ap-south-1`)
 
-This guide configures **OpenID Connect (OIDC)** so GitHub Actions can assume an IAM role in **`ap-south-1` (Mumbai)** without long-lived AWS access keys. SSH deploy to EC2 still uses the instance Elastic IP + `fno-ec2-key.pem` via GitHub Secrets.
+GitHub Actions authenticates to AWS with **IAM user access keys** stored in repo secrets, then deploys to EC2 over SSH (Elastic IP + `fno-ec2-key.pem`).
 
-**Repo (this project):** `russelnickson/agentic-trade-future-and-options`  
-**Branch allowed to assume the role:** `main`
+**Repo:** `russelnickson/agentic-trade-future-and-options`  
+**Region:** `ap-south-1` (Mumbai)
 
----
-
-## 1. IAM OIDC identity provider
-
-In IAM → **Identity providers** → **Add provider**:
-
-| Field | Value |
-|-------|--------|
-| Provider type | OpenID Connect |
-| Provider URL | `https://token.actions.githubusercontent.com` |
-| Audience | `sts.amazonaws.com` |
-
-After create, note the provider ARN (used implicitly when you attach the trust policy to a role).
+> Prefer rotating keys periodically. Do not commit keys into the repo or `.env` checked into git.
 
 ---
 
-## 2. IAM role trust policy (OIDC)
+## 1. IAM user for deploy
 
-Create a role (e.g. `aws-ec2-deployment-runner`) with **Custom trust policy**:
+1. IAM → **Users** → **Create user** (e.g. `github-actions-fno-deploy`).
+2. Attach a minimal policy (or use console **Attach policies directly**). Example inline policy for identity check + optional EC2 describe:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "IdentityCheck",
       "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::960705222705:oidc-provider/token.actions.githubusercontent.com"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-        },
-        "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:russelnickson/agentic-trade-future-and-options:ref:refs/heads/main"
-        }
-      }
-    }
-  ]
-}
-```
-
-Replace `<AWS_ACCOUNT_ID>` with your 12-digit account ID.
-
-**Condition summary**
-
-- **Provider:** `token.actions.githubusercontent.com`
-- **Audience (`aud`):** `sts.amazonaws.com`
-- **Subject (`sub`):** must match what GitHub actually issues for the job
-
-| Job config | Typical `sub` |
-|------------|----------------|
-| Push to `main`, **no** `environment:` | `repo:russelnickson/agentic-trade-future-and-options:ref:refs/heads/main` |
-| Job sets `environment: production` | `repo:russelnickson/agentic-trade-future-and-options:environment:production` |
-
-This repo’s deploy job intentionally **omits** `environment:` so the trust policy above works as written.
-
-If you later add `environment: production`, update the trust condition to:
-
-```json
-"StringLike": {
-  "token.actions.githubusercontent.com:sub": "repo:russelnickson/agentic-trade-future-and-options:environment:production"
-}
-```
-
-Or allow both with two statements / a broader pattern:
-
-```json
-"StringLike": {
-  "token.actions.githubusercontent.com:sub": [
-    "repo:russelnickson/agentic-trade-future-and-options:ref:refs/heads/main",
-    "repo:russelnickson/agentic-trade-future-and-options:environment:*"
-  ]
-}
-```
-
-### Common failure
-
-```text
-Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity
-```
-
-Checklist:
-
-1. IAM OIDC provider exists for `token.actions.githubusercontent.com` with audience `sts.amazonaws.com`.
-2. Role trust `Federated` ARN account ID matches the role account.
-3. Trust `sub` matches the job (see table — **environment vs ref**).
-4. Secret `AWS_ROLE_ARN` is the **full** role ARN only — no quotes, spaces, or newlines:
-
-   ```text
-   arn:aws:iam::960705222705:role/aws-ec2-deployment-runner
-   ```
-
-   Invalid examples that cause `Request ARN is invalid`:
-   - `github-actions-fno-deploy` (name only)
-   - `"arn:aws:iam::…:role/…"` (quoted)
-   - ARN with trailing newline/space pasted from the console
-5. Thumbprint on the OIDC provider is current (IAM usually manages this; recreate provider if stale).
-
----
-
-## 3. IAM permission policy (deploy + EC2/SSM checks)
-
-Attach an inline or managed policy to the same role, e.g. `github-actions-fno-deploy-permissions`:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowSelfAssumeViaOidc",
-      "Effect": "Allow",
-      "Action": [
-        "sts:GetCallerIdentity"
-      ],
+      "Action": ["sts:GetCallerIdentity"],
       "Resource": "*"
     },
     {
-      "Sid": "DescribeEc2ForDeployTarget",
+      "Sid": "OptionalEc2Read",
       "Effect": "Allow",
       "Action": [
         "ec2:DescribeInstances",
-        "ec2:DescribeInstanceStatus",
-        "ec2:DescribeAddresses",
-        "ec2:DescribeTags",
-        "ec2:DescribeRegions"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": "ap-south-1"
-        }
-      }
-    },
-    {
-      "Sid": "SsmConnectivityChecks",
-      "Effect": "Allow",
-      "Action": [
-        "ssm:DescribeInstanceInformation",
-        "ssm:GetConnectionStatus",
-        "ssm:ListInstanceAssociations",
-        "ssm:DescribeInstanceProperties"
+        "ec2:DescribeAddresses"
       ],
       "Resource": "*"
-    },
-    {
-      "Sid": "OptionalSsmRunCommandRead",
-      "Effect": "Allow",
-      "Action": [
-        "ssm:ListCommands",
-        "ssm:ListCommandInvocations",
-        "ssm:GetCommandInvocation"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "OptionalSsmSendCommandScoped",
-      "Effect": "Allow",
-      "Action": [
-        "ssm:SendCommand"
-      ],
-      "Resource": [
-        "arn:aws:ec2:ap-south-1:<AWS_ACCOUNT_ID>:instance/*",
-        "arn:aws:ssm:ap-south-1::document/AWS-RunShellScript",
-        "arn:aws:ssm:ap-south-1:<AWS_ACCOUNT_ID>:document/*"
-      ]
     }
   ]
 }
 ```
 
-Replace `<AWS_ACCOUNT_ID>` again. Tighten `ssm:SendCommand` / `ec2:Describe*` further to a single instance ID when you have it.
+The current workflow only needs `sts:GetCallerIdentity` for the verify step; the real deploy is SSH.
 
-**Role ARN (example shape — copy from IAM after create):**
-
-```text
-arn:aws:iam::960705222705:role/aws-ec2-deployment-runner
-```
+3. **Security credentials** → **Create access key** → Application running outside AWS → create.
+4. Copy **Access key ID** and **Secret access key** once (secret is shown only once).
 
 ---
 
-## 4. GitHub Actions secrets
+## 2. GitHub Secrets
 
-**GitHub → repo → Settings → Secrets and variables → Actions → New repository secret**
+Repo → **Settings → Secrets and variables → Actions**:
 
-| Secret name | Value |
-|-------------|--------|
-| `AWS_ROLE_ARN` | ARN of the IAM role created above (OIDC deploy role). |
-| `EC2_HOST` | Elastic Static IP of the EC2 instance in `ap-south-1`. |
+| Secret | Value |
+|--------|--------|
+| `AWS_ACCESS_KEY_ID` | `AKIA…` (no quotes / spaces / newlines) |
+| `AWS_SECRET_ACCESS_KEY` | Secret key string (no quotes / newlines) |
+| `EC2_HOST` | Elastic IP of the EC2 instance |
 | `EC2_USERNAME` | `ubuntu` |
-| `EC2_SSH_KEY` | Full private key PEM contents of `fno-ec2-key.pem` (including `-----BEGIN … KEY-----` / `-----END … KEY-----`). |
+| `EC2_SSH_KEY` | Full PEM of `fno-ec2-key.pem` including `BEGIN` / `END` lines |
 
-### Workflow usage (reference)
+You can remove the unused `AWS_ROLE_ARN` secret if it remains from the old OIDC setup.
 
-```yaml
-permissions:
-  id-token: write   # required for OIDC
-  contents: read
+---
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ap-south-1
-      - name: Verify caller identity
-        run: aws sts get-caller-identity
-      # SSH deploy example (uses EC2_* secrets; not AWS keys)
-      - name: Deploy over SSH
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-        run: |
-          install -m 600 /dev/null "${RUNNER_TEMP}/fno-ec2-key.pem"
-          printf '%s\n' "$EC2_SSH_KEY" > "${RUNNER_TEMP}/fno-ec2-key.pem"
-          ssh -i "${RUNNER_TEMP}/fno-ec2-key.pem" \
-            -o StrictHostKeyChecking=accept-new \
-            "${EC2_USERNAME}@${EC2_HOST}" 'uname -a'
+## 3. Workflow behaviour
+
+`.github/workflows/deploy.yml`:
+
+1. Run pytest on `main` / `workflow_dispatch`.
+2. Configure AWS credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (`ap-south-1`).
+3. `aws sts get-caller-identity`.
+4. SSH to `EC2_HOST` as `ubuntu` with `EC2_SSH_KEY`, pull `main`, install deps, `pm2 restart fno-worker`.
+
+Trigger manually:
+
+```bash
+gh workflow run "Deploy to AWS EC2" --ref main
+gh run watch
 ```
 
 ---
 
-## 5. Security checklist
+## 4. Common failures
 
-- Do **not** store AWS access keys in GitHub Secrets when OIDC is configured.
-- Do **not** commit `fno-ec2-key.pem`, `.env`, or role ARNs with live credentials into git.
-- Keep the trust `sub` locked to `ref:refs/heads/main` until you explicitly need other branches/environments.
-- Prefer SSM Session Manager / SendCommand over opening broad SSH from the internet when practicable; keep `EC2_SSH_KEY` as a fallback for PM2/FastAPI deploys.
+| Error | Fix |
+|-------|-----|
+| `AWS_ACCESS_KEY_ID secret is empty` | Add the secret; ensure name matches exactly |
+| `looks invalid (expected AKIA…)` | Use IAM **user** keys, not temporary `ASIA…` session keys; strip quotes |
+| `InvalidClientTokenId` / `SignatureDoesNotMatch` | Wrong secret, rotated key, or trailing newline in secret |
+| SSH timeout / connection refused | Instance running, SG allows port 22 from GitHub runners (or your IP for manual SSH), `EC2_HOST` is the current Elastic IP |
+| `Permission denied (publickey)` | `EC2_SSH_KEY` must match the instance key pair |
 
 ---
 
-## 6. Quick validation
+## 5. Security notes
 
-1. Push a workflow on `main` that only runs `aws sts get-caller-identity`.
-2. Confirm AssumedRole ARN matches `AWS_ROLE_ARN`.
-3. Confirm `EC2_HOST` SSH with `ubuntu` + `EC2_SSH_KEY` works from the runner.
+- Store keys only in GitHub Secrets (or local `.env`, never committed).
+- Scope the IAM user to the smallest policy that still lets the job pass.
+- Rotate access keys if leaked; delete unused keys in IAM.
+- Keep SSH locked down (your IP + whatever is required for Actions).

@@ -7,7 +7,6 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -41,39 +40,36 @@ jobs:
     name: deploy-to-aws-ec2
     needs: test-and-lint
     runs-on: ubuntu-latest
-    # Do NOT set `environment:` here unless the IAM trust `sub` allows
-    # `repo:russelnickson/agentic-trade-future-and-options:environment:<name>`.
-    # With `environment: production`, GitHub issues a different OIDC subject than
-    # `ref:refs/heads/main` and AssumeRoleWithWebIdentity fails.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate AWS_ROLE_ARN
-        id: aws_role
+      - name: Validate AWS access key secrets
         env:
-          RAW_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          ARN="$(printf '%s' "${RAW_ARN}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//')"
-          if [[ -z "${ARN}" ]]; then
-            echo "::error::AWS_ROLE_ARN secret is empty"
+          if [[ -z "${AWS_ACCESS_KEY_ID}" ]]; then
+            echo "::error::AWS_ACCESS_KEY_ID secret is empty"
             exit 1
           fi
-          if [[ ! "${ARN}" =~ ^arn:aws:iam::[0-9]{12}:role/.+ ]]; then
-            echo "::error::AWS_ROLE_ARN must be a full role ARN like arn:aws:iam::123456789012:role/github-actions-fno-deploy (got invalid format; check quotes/spaces/newlines in the secret)"
+          if [[ -z "${AWS_SECRET_ACCESS_KEY}" ]]; then
+            echo "::error::AWS_SECRET_ACCESS_KEY secret is empty"
             exit 1
           fi
-          echo "arn=${ARN}" >> "${GITHUB_OUTPUT}"
-          echo "AWS_ROLE_ARN format OK (account …${ARN:13:4}… role suffix hidden)"
+          if [[ ! "${AWS_ACCESS_KEY_ID}" =~ ^AKIA[0-9A-Z]{16}$ ]]; then
+            echo "::error::AWS_ACCESS_KEY_ID looks invalid (expected AKIA… IAM user key; no quotes/spaces)"
+            exit 1
+          fi
+          echo "AWS access key secrets present (key id suffix …${AWS_ACCESS_KEY_ID: -4})"
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials (access keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ steps.aws_role.outputs.arn }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-south-1
-          audience: sts.amazonaws.com
-          role-session-name: gha-fno-deploy
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
