@@ -233,24 +233,68 @@ def kite_login_url(api_key: str) -> str:
     return f"https://kite.zerodha.com/connect/login?v=3&api_key={key}"
 
 
-def extract_request_token(raw: str) -> str:
-    """Accept a bare request_token or a full redirect URL containing it."""
+def parse_zerodha_redirect(raw: str) -> tuple[str | None, str | None]:
+    """
+    Parse a pasted Zerodha callback.
+
+    Returns ``(request_token, error_message)``. Exactly one side is set on
+    success/error; both None if the paste is empty / unusable.
+    """
     text = (raw or "").strip()
     if not text:
-        return ""
-    if "request_token=" in text:
-        from urllib.parse import parse_qs, urlparse
+        return None, None
 
-        # Handle full URL or query-only fragment.
-        if "://" not in text and text.startswith("?"):
-            text = "https://local" + text
-        elif "://" not in text and "request_token=" in text:
-            text = "https://local/?" + text.split("?", 1)[-1]
-        parsed = urlparse(text)
-        values = parse_qs(parsed.query).get("request_token") or []
-        if values:
-            return values[0].strip()
-    return text.split("&", 1)[0].strip()
+    # Browser sometimes shows Zerodha's JSON error body instead of a URL.
+    if text.startswith("{") and '"status"' in text:
+        try:
+            import json
+
+            payload = json.loads(text)
+            if str(payload.get("status", "")).lower() == "error":
+                msg = str(payload.get("message") or payload)
+                return None, msg
+        except Exception:
+            pass
+
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    candidate = text
+    if "request_token=" in candidate or "status=" in candidate:
+        if "://" not in candidate and candidate.startswith("?"):
+            candidate = "https://local" + candidate
+        elif "://" not in candidate:
+            candidate = "https://local/?" + candidate.split("?", 1)[-1]
+
+    parsed = urlparse(candidate)
+    query = parse_qs(parsed.query)
+    status = (query.get("status") or [None])[0]
+    if status and str(status).lower() == "error":
+        msg = (query.get("message") or query.get("error_type") or ["Zerodha login error"])[0]
+        return None, unquote(str(msg))
+
+    token_vals = query.get("request_token") or []
+    if token_vals:
+        return token_vals[0].strip(), None
+
+    # Bare token (no query string)
+    if "request_token=" not in text and "://" not in text and "&" not in text and len(text) >= 20:
+        return text.split()[0].strip(), None
+
+    # Fall back to previous extractor behaviour
+    if "request_token=" in text:
+        token = extract_request_token(text)
+        if token and "status=error" not in token:
+            return token, None
+
+    return None, "Could not find request_token in the paste. Re-open Kite login and copy the redirect URL."
+
+
+def extract_request_token(raw: str) -> str:
+    """Accept a bare request_token or a full redirect URL containing it."""
+    token, err = parse_zerodha_redirect(raw)
+    if err:
+        return ""
+    return token or ""
 
 
 def exchange_zerodha_request_token(
@@ -265,7 +309,18 @@ def exchange_zerodha_request_token(
     """
     api_key = (api_key or "").strip()
     api_secret = (api_secret or "").strip()
-    request_token = extract_request_token(request_token)
+    token, parse_err = parse_zerodha_redirect(request_token)
+    if parse_err:
+        tip = ""
+        if "request_token" in parse_err.lower() or "re-initiating" in parse_err.lower():
+            tip = (
+                " Usually this means the **Redirect URL** on developers.kite.trade "
+                "does not exactly match where Zerodha sent you "
+                "(``http://127.0.0.1`` vs ``http://localhost:8501`` are different). "
+                "Fix the app redirect, open a private/incognito window, and login again."
+            )
+        return False, f"Zerodha login failed: {parse_err}.{tip}", None
+    request_token = (token or "").strip()
     if not api_key or not api_secret:
         return False, "API Key and API Secret are required.", None
     if not request_token:
@@ -290,11 +345,26 @@ def exchange_zerodha_request_token(
                 "ZERODHA_API_KEY": api_key,
                 "ZERODHA_API_SECRET": api_secret,
                 "ZERODHA_ACCESS_TOKEN": access,
+                "TRADE_BROKER": "zerodha",
             }
         )
+        try:
+            from config.settings import get_settings
+
+            get_settings.cache_clear()
+        except Exception:
+            pass
+        apply_secrets_to_environ()
         return True, f"Access token saved. Logged in as {uid}.", access
     except Exception as exc:
-        return False, f"{type(exc).__name__}: {exc}", None
+        msg = str(exc)
+        tip = ""
+        low = msg.lower()
+        if "checksum" in low or "api_secret" in low or "invalid" in low:
+            tip = " Check that API Secret matches this API Key on developers.kite.trade."
+        if "token" in low and "expired" in low:
+            tip = " request_token is one-time and expires in ~1–2 minutes — login again and paste immediately."
+        return False, f"{type(exc).__name__}: {exc}.{tip}", None
 
 
 def validate_zerodha(

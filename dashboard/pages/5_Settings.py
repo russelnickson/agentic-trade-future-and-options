@@ -141,9 +141,27 @@ st.divider()
 # ----------------------------------------------------------------------- Zerodha
 st.subheader("Zerodha Kite — simple login")
 st.caption(
-    "You do **not** need a TOTP secret. Log in once in the browser each trading day, "
-    "paste the redirect token here, and we save the access token locally."
+    "Manual browser login once per day → paste redirect → we exchange for `access_token`."
 )
+
+z_help = st.popover("Fix: Error generating request_token")
+with z_help:
+    st.markdown(
+        """
+That JSON comes from **Zerodha**, before our app sees a token. Almost always:
+
+1. Open [developers.kite.trade](https://developers.kite.trade) → your app.
+2. Set **Redirect URL** to an exact match of the browser address after login, e.g.
+   - Local Streamlit: `http://localhost:8501` **or** `http://127.0.0.1:8501`  
+     (pick **one** — they are not interchangeable)
+   - EC2 portal: `http://13.207.36.246:8501`
+3. Save the app, then use a **private/incognito** window.
+4. Open the login link again, complete login **manually** (no automation).
+5. You should land on your redirect with `?request_token=...&status=success` — paste that URL here.
+
+Also check: API Key in Settings matches that same Kite app, and API Secret is correct.
+"""
+    )
 
 z_api_key = st.text_input(
     "1. API Key",
@@ -172,15 +190,17 @@ else:
 st.markdown(
     """
 After you sign in, Zerodha redirects you to your app URL. Copy either:
-- the full redirect URL, or  
+- the full redirect URL (`…?request_token=…&status=success`), or  
 - just the `request_token=...` value from it
+
+If you see JSON with `Error generating request_token`, fix the Redirect URL (popover above) and try again — do not paste that JSON as a token.
 """
 )
 z_request = st.text_input(
     "4. Paste request_token (or full redirect URL)",
     value="",
     key="set_z_request",
-    placeholder="request_token=…  or  https://…?request_token=…",
+    placeholder="https://localhost:8501/?request_token=…&status=success",
 )
 
 ex1, ex2 = st.columns([1, 1])
