@@ -105,7 +105,6 @@ jobs:
             echo "host=${HOST}"
             echo "username=${USER}"
           } >> "${GITHUB_OUTPUT}"
-          # Multiline key for ssh-action
           {
             echo "key<<EOF"
             printf '%s\n' "${KEY}"
@@ -113,7 +112,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           echo "EC2 SSH secrets OK (host=${HOST}, user=${USER})"
 
-      - name: Deploy to EC2 (rsync + remote install)
+      - name: Deploy to EC2 (rsync + portal + worker)
         env:
           EC2_HOST: ${{ steps.ec2.outputs.host }}
           EC2_USERNAME: ${{ steps.ec2.outputs.username }}
@@ -132,9 +131,11 @@ jobs:
           "${SSH[@]}" "${REMOTE}" bash -s <<'REMOTE_BOOTSTRAP'
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
-          # apt needrestart chatter on stderr is normal — ignore labels from CI log viewers
           sudo apt-get update -y
-          sudo apt-get install -y python3 python3-pip python3-venv git curl rsync
+          sudo apt-get install -y \
+            python3 python3-pip python3-venv git curl rsync redis-server
+          sudo systemctl enable redis-server
+          sudo systemctl start redis-server || sudo service redis-server start || true
           if ! command -v node >/dev/null 2>&1; then
             curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
             sudo apt-get install -y nodejs
@@ -156,7 +157,7 @@ jobs:
             -e "${RSYNC_SSH}" \
             ./ "${REMOTE}:${APP_DIR}/"
 
-          echo "==> install deps + pm2 on remote"
+          echo "==> install deps + start FastAPI worker + Streamlit portal"
           "${SSH[@]}" "${REMOTE}" bash -s <<'REMOTE_INSTALL'
           set -euo pipefail
           APP_DIR="/home/ubuntu/app"
@@ -168,10 +169,38 @@ jobs:
           source venv/bin/activate
           pip install --upgrade pip
           pip install -r requirements.txt
+
+          if [ ! -f .env ]; then
+            umask 077
+            printf '%s\n' \
+              'REDIS_URL=redis://127.0.0.1:6379/0' \
+              'EC2_HOST=127.0.0.1' \
+              'EC2_ELASTIC_IP=127.0.0.1' \
+              'PAPER_TRADING=true' \
+              'BROKER_NAME=dhan' \
+              'INTERNAL_AUTH_SECRET=change-me-set-in-ec2-dotenv' \
+              'STREAMLIT_SERVER_ADDRESS=0.0.0.0' \
+              'STREAMLIT_SERVER_PORT=8501' \
+              > .env
+          fi
+          grep -q '^REDIS_URL=' .env || echo 'REDIS_URL=redis://127.0.0.1:6379/0' >> .env
+          grep -q '^EC2_HOST=' .env || echo 'EC2_HOST=127.0.0.1' >> .env
+          grep -q '^EC2_ELASTIC_IP=' .env || echo 'EC2_ELASTIC_IP=127.0.0.1' >> .env
+          grep -q '^STREAMLIT_SERVER_PORT=' .env || echo 'STREAMLIT_SERVER_PORT=8501' >> .env
+          grep -q '^STREAMLIT_SERVER_ADDRESS=' .env || echo 'STREAMLIT_SERVER_ADDRESS=0.0.0.0' >> .env
+
           pm2 delete fno-worker >/dev/null 2>&1 || true
+          pm2 delete streamlit_dashboard >/dev/null 2>&1 || true
+
           pm2 start "venv/bin/uvicorn execution_worker.main:app --host 0.0.0.0 --port 8000" \
             --name "fno-worker" --cwd "$APP_DIR"
+          pm2 start workers/streamlit_dashboard.py \
+            --name "streamlit_dashboard" \
+            --interpreter "$APP_DIR/venv/bin/python" \
+            --cwd "$APP_DIR"
           pm2 save
           pm2 status
-          echo "==> deploy OK"
+          curl -sf -m 5 http://127.0.0.1:8000/health || true
+          curl -sf -m 5 -o /dev/null -w "portal_http=%{http_code}\n" http://127.0.0.1:8501/ || true
+          echo "==> deploy OK — portal at http://HOST:8501 (SG must allow TCP 8501)"
           REMOTE_INSTALL
