@@ -1,0 +1,58 @@
+# Keep Cursor context lean — do not index heavy/runtime paths into the vector DB.
+
+# Virtualenvs
+.venv/
+venv/
+ENV/
+env/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+htmlcov/
+.coverage
+.coverage.*
+
+# Secrets (never in context)
+.env
+.env.*
+.secrets.env
+*.pem
+*.key
+.aws/
+.secrets/
+
+# Logs & temp
+*.log
+logs/
+*.jsonl
+tmp/
+temp/
+*.tar
+*.tar.gz
+
+# Market / local data blobs
+*.parquet
+data/global/
+data/live_market/
+data/insights/
+data/desk/
+data/history/
+
+# Docker / build / node
+dist/
+build/
+node_modules/
+.pm2/
+.docker/
+
+# IDE noise
+.cursor/
+.vscode/
+.idea/
