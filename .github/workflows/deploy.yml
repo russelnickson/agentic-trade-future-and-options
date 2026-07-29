@@ -74,12 +74,51 @@ jobs:
       - name: Verify AWS identity
         run: aws sts get-caller-identity
 
+      - name: Validate EC2 SSH secrets
+        id: ec2
+        env:
+          RAW_HOST: ${{ secrets.EC2_HOST }}
+          RAW_USER: ${{ secrets.EC2_USERNAME }}
+          RAW_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          HOST="$(printf '%s' "${RAW_HOST}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' -e 's#^https\?://##' -e 's#/$##')"
+          USER="$(printf '%s' "${RAW_USER}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//')"
+          KEY="$(printf '%s' "${RAW_KEY}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [[ -z "${HOST}" ]]; then
+            echo "::error::EC2_HOST secret is empty (set Elastic IP or public DNS, no quotes)"
+            exit 1
+          fi
+          if [[ -z "${USER}" ]]; then
+            echo "::error::EC2_USERNAME secret is empty (expected ubuntu)"
+            exit 1
+          fi
+          if [[ -z "${KEY}" ]]; then
+            echo "::error::EC2_SSH_KEY secret is empty (paste full PEM including BEGIN/END lines)"
+            exit 1
+          fi
+          if ! printf '%s\n' "${KEY}" | grep -q 'BEGIN.*PRIVATE KEY'; then
+            echo "::error::EC2_SSH_KEY does not look like a PEM private key"
+            exit 1
+          fi
+          {
+            echo "host=${HOST}"
+            echo "username=${USER}"
+          } >> "${GITHUB_OUTPUT}"
+          # Multiline key for ssh-action
+          {
+            echo "key<<EOF"
+            printf '%s\n' "${KEY}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+          echo "EC2 SSH secrets OK (host=${HOST}, user=${USER})"
+
       - name: Deploy to EC2 over SSH
         uses: appleboy/ssh-action@v1.0.0
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
+          host: ${{ steps.ec2.outputs.host }}
+          username: ${{ steps.ec2.outputs.username }}
+          key: ${{ steps.ec2.outputs.key }}
           script_stop: true
           script: |
             set -euo pipefail
