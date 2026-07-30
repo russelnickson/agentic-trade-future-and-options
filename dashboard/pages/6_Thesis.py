@@ -15,7 +15,7 @@ if str(_ROOT) not in sys.path:
 
 from dashboard.auth import render_sidebar_profile, require_login
 from dashboard.components.capital import fetch_capital
-from dashboard.components.console_runtime import classify_day_outcome
+from dashboard.components.console_runtime import classify_day_outcome, session_clock
 from dashboard.components.positions import fetch_positions
 from dashboard.secrets_store import apply_secrets_to_environ
 from dashboard.timefmt import format_ist
@@ -62,15 +62,19 @@ client = _redis()
 
 st.title("Thesis")
 st.caption(
-    "Live **target profit vs achieved** (nett of charges) — "
+    "Live **target vs achieved nett P&L after brokerage, SEBI, STT, GST, stamp & exchange** — "
     "priority **PHENOMENAL → OKAY → FLAT → ACCEPTABLE_LOSS → BREACH**, ticking with the market."
 )
+
+clock = session_clock()
+live_desk = clock.is_live_desk or clock.phase in {"PRE_OPEN", "OPEN", "CLOSING"}
 
 with st.sidebar:
     st.subheader("Thesis")
     symbol = st.selectbox("Underlying", ["NIFTY", "BANKNIFTY", "FINNIFTY"])
     broker = st.selectbox("Broker (P&L / capital)", ["dhan", "zerodha"])
-    refresh_sec = st.select_slider("Live tick (sec)", options=[2, 5, 10, 30], value=5)
+    auto_live = st.toggle("Live refresh (market hours)", value=live_desk)
+    refresh_sec = st.select_slider("Live tick (sec)", options=[2, 5, 10, 30], value=5 if live_desk else 30)
     turnover = st.number_input(
         "Premium turnover proxy (₹)",
         min_value=0.0,
@@ -117,8 +121,7 @@ fee_total = float(charges.get("total") or 0)
 capital_ref = float(thesis.get("capital_ref") or 0)
 
 
-@st.fragment(run_every=timedelta(seconds=int(refresh_sec)))
-def live_ticker() -> None:
+def _render_ticker() -> None:
     tick = live_market_tick(
         symbol,
         broker=broker,
@@ -140,12 +143,15 @@ def live_ticker() -> None:
     t1, t2, t3, t4, t5 = st.columns([1.2, 1, 1, 1, 1])
     t1.metric(f"{symbol} LTP", ltp_s)
     t2.metric(
-        "Day target (nett)",
+        "Day target (nett after fees)",
         f"₹{target_nett:+,.0f}",
-        help=f"Enter **{primary}** after fees · gross ≈ ₹{target_gross:+,.0f}",
+        help=(
+            f"Enter **{primary}** after brokerage+SEBI+STT+GST · "
+            f"gross ≈ ₹{target_gross:+,.0f}"
+        ),
     )
     t3.metric(
-        "Achieved (nett)",
+        "Achieved nett (after fees)",
         "—" if achieved_nett is None else f"₹{achieved_nett:+,.0f}",
         delta=(
             None
@@ -172,13 +178,22 @@ def live_ticker() -> None:
     pcr = tick.get("pcr")
     atm = tick.get("atm")
     st.caption(
-        f"Chase **{primary}** · fees in model ₹{fee_total:,.2f} · "
+        f"Chase **{primary}** · fees in model ₹{fee_total:,.2f} "
+        f"(brokerage+SEBI+STT+exchange+stamp+GST) · "
         f"ATM {atm or '—'} · PCR {f'{pcr:.3f}' if isinstance(pcr, (int, float)) else '—'} · "
         f"tick {format_ist(tick.get('asof'))}"
     )
 
 
-live_ticker()
+if auto_live:
+
+    @st.fragment(run_every=timedelta(seconds=int(refresh_sec)))
+    def live_ticker() -> None:
+        _render_ticker()
+
+    live_ticker()
+else:
+    _render_ticker()
 
 st.divider()
 st.markdown("### Consolidation")

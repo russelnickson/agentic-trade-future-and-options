@@ -321,14 +321,17 @@ def _render_sidebar(client: RedisClient | None) -> tuple[str, int, dict, str]:
 
 
 def _render_header(clock, day) -> None:
+    from config.runtime_mode import mode_banner
+
     st.markdown(f'<p class="console-brand">{CONSOLE_TITLE}</p>', unsafe_allow_html=True)
     st.markdown(
         '<p class="console-tag">LangGraph strategy (slow) · tactical Python orders/stops (fast) · '
         "probabilistic sleeves · hard day-loss · "
-        "Scout · Voices · Research · Risk · Trade · "
-        "decent close (phenomenal · okay · flat · acceptable loss)</p>",
+        "Scout · Voices · Research · Thesis · Risk · Trade · "
+        "nett P&L after brokerage / SEBI / STT / GST</p>",
         unsafe_allow_html=True,
     )
+    st.info(mode_banner())
     st.markdown(
         f'<div class="console-phase">{clock.phase} · {clock.now_ist} · {clock.label}</div>',
         unsafe_allow_html=True,
@@ -547,6 +550,14 @@ def main() -> None:
 
     client = _redis()
     symbol, refresh_rate_sec, controls, broker = _render_sidebar(client)
+
+    # During market hours, never go fully static — keep insights/fleet live
+    clock = session_clock()
+    if clock.is_live_desk or clock.phase in {"PRE_OPEN", "OPEN", "CLOSING"}:
+        if refresh_rate_sec <= 0:
+            refresh_rate_sec = 5
+        else:
+            refresh_rate_sec = min(int(refresh_rate_sec), 10)
 
     if refresh_rate_sec > 0:
 

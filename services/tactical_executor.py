@@ -82,6 +82,13 @@ def evaluate_stops(
     client = redis_client or get_redis_client()
     if dry_run is None:
         dry_run = not auto_execute_enabled()
+    try:
+        from config.runtime_mode import is_local_paper_desk, paper_trading_enabled
+
+        if is_local_paper_desk() or paper_trading_enabled():
+            dry_run = True
+    except Exception:
+        pass
 
     state = load_day_risk(client)
     actions: list[dict[str, Any]] = []

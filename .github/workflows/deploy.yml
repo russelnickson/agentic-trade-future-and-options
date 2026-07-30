@@ -182,7 +182,9 @@ jobs:
               'REDIS_URL=redis://127.0.0.1:6379/0' \
               'EC2_HOST=127.0.0.1' \
               'EC2_ELASTIC_IP=127.0.0.1' \
-              'PAPER_TRADING=true' \
+              'PAPER_TRADING=false' \
+              'DESK_ROLE=ec2_live' \
+              'TRADE_AUTO_EXECUTE=1' \
               'BROKER_NAME=dhan' \
               'INTERNAL_AUTH_SECRET=change-me-set-in-ec2-dotenv' \
               'STREAMLIT_SERVER_ADDRESS=0.0.0.0' \
@@ -194,6 +196,35 @@ jobs:
           grep -q '^EC2_ELASTIC_IP=' .env || echo 'EC2_ELASTIC_IP=127.0.0.1' >> .env
           grep -q '^STREAMLIT_SERVER_PORT=' .env || echo 'STREAMLIT_SERVER_PORT=8501' >> .env
           grep -q '^STREAMLIT_SERVER_ADDRESS=' .env || echo 'STREAMLIT_SERVER_ADDRESS=0.0.0.0' >> .env
+          # EC2 = live Dhan desk (local laptop stays paper via config.runtime_mode)
+          touch /home/ubuntu/app/.ec2_desk
+          if grep -q '^PAPER_TRADING=' .env; then
+            sed -i 's/^PAPER_TRADING=.*/PAPER_TRADING=false/' .env
+          else
+            echo 'PAPER_TRADING=false' >> .env
+          fi
+          if grep -q '^BROKER_NAME=' .env; then
+            sed -i 's/^BROKER_NAME=.*/BROKER_NAME=dhan/' .env
+          else
+            echo 'BROKER_NAME=dhan' >> .env
+          fi
+          if grep -q '^DESK_ROLE=' .env; then
+            sed -i 's/^DESK_ROLE=.*/DESK_ROLE=ec2_live/' .env
+          else
+            echo 'DESK_ROLE=ec2_live' >> .env
+          fi
+          if grep -q '^TRADE_AUTO_EXECUTE=' .env; then
+            sed -i 's/^TRADE_AUTO_EXECUTE=.*/TRADE_AUTO_EXECUTE=1/' .env
+          else
+            echo 'TRADE_AUTO_EXECUTE=1' >> .env
+          fi
+          # Prefer DHAN_* as worker broker credentials when BROKER_* unset
+          if ! grep -q '^BROKER_API_KEY=' .env && grep -q '^DHAN_CLIENT_ID=' .env; then
+            echo "BROKER_API_KEY=$(grep '^DHAN_CLIENT_ID=' .env | cut -d= -f2-)" >> .env
+          fi
+          if ! grep -q '^BROKER_ACCESS_TOKEN=' .env && grep -q '^DHAN_ACCESS_TOKEN=' .env; then
+            echo "BROKER_ACCESS_TOKEN=$(grep '^DHAN_ACCESS_TOKEN=' .env | cut -d= -f2-)" >> .env
+          fi
 
           pm2 delete fno-worker >/dev/null 2>&1 || true
           pm2 delete streamlit_dashboard >/dev/null 2>&1 || true

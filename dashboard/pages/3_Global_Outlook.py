@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +14,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from dashboard.auth import render_sidebar_profile, require_login
+from dashboard.components.console_runtime import session_clock
 from dashboard.secrets_store import apply_secrets_to_environ
 from dashboard.timefmt import format_ist
 from services.global_outlook import (
@@ -84,6 +86,9 @@ require_login()
 apply_secrets_to_environ()
 render_sidebar_profile()
 
+clock = session_clock()
+live_desk = clock.is_live_desk or clock.phase in {"PRE_OPEN", "OPEN", "CLOSING"}
+
 st.title("Global Outlook")
 st.caption(
     "Overseas markers, GIFT/India proxies, commodities, FX, and FII/DII flows "
@@ -92,6 +97,8 @@ st.caption(
 
 with st.sidebar:
     st.subheader("Global Outlook")
+    auto_live = st.toggle("Live refresh (market hours)", value=live_desk)
+    tick_sec = st.select_slider("Tick seconds", options=[10, 30, 60], value=30)
     if st.button("Refresh all markers", type="primary", use_container_width=True):
         with st.spinner("Pulling Dhan · Yahoo · NSE FII/DII…"):
             try:
@@ -104,6 +111,19 @@ with st.sidebar:
         "Sources: Dhan (NIFTY / VIX / GIFT / MCX), Yahoo (US·EU·Asia·FX), "
         "NSE FII/DII cash. Cached under `data/global/`."
     )
+
+if auto_live:
+
+    @st.fragment(run_every=timedelta(seconds=int(tick_sec)))
+    def _live_pulse() -> None:
+        c = session_clock()
+        s = load_snapshot()
+        st.caption(
+            f"Live · {c.phase} · {c.now_ist}"
+            + (f" · bias **{(s.bias if s else '—')}**" if s else " · no snapshot")
+        )
+
+    _live_pulse()
 
 snap = load_snapshot()
 markers = load_markers_table()

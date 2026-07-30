@@ -44,9 +44,14 @@ def _today() -> str:
 
 
 def auto_execute_enabled() -> bool:
-    """Default ON — desk doctrine is hunt & execute. Set TRADE_AUTO_EXECUTE=0 to propose only."""
-    raw = (os.getenv("TRADE_AUTO_EXECUTE") or "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    """Hunt & execute on EC2 live; local paper defaults to propose/dry-run only."""
+    try:
+        from config.runtime_mode import auto_execute_default
+
+        return bool(auto_execute_default())
+    except Exception:
+        raw = (os.getenv("TRADE_AUTO_EXECUTE") or "1").strip().lower()
+        return raw not in {"0", "false", "no", "off"}
 
 
 def lot_size(symbol: str) -> int:
@@ -477,6 +482,15 @@ def execute_hunt(
 
     if dry_run is None:
         dry_run = not auto_execute_enabled()
+
+    # Localhost desk never sends live broker orders from this process
+    try:
+        from config.runtime_mode import is_local_paper_desk, paper_trading_enabled
+
+        if is_local_paper_desk() or paper_trading_enabled():
+            dry_run = True
+    except Exception:
+        pass
 
     from services.order_guard import OrderGuardError, place_protected_limit_order
 

@@ -171,6 +171,15 @@ def place_protected_limit_order(
 
     redis = redis_client
     if not dry_run:
+        try:
+            from config.runtime_mode import is_local_paper_desk, paper_trading_enabled
+
+            if is_local_paper_desk() or paper_trading_enabled():
+                dry_run = True
+        except Exception:
+            pass
+
+    if not dry_run:
         assert_order_placement_allowed(redis)
 
     limit_price = compute_protected_limit_price(

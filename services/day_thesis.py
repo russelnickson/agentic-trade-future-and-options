@@ -114,9 +114,9 @@ class DayThesis:
     consolidation: str = ""
     sources: dict[str, Any] = field(default_factory=dict)
     disclaimer: str = (
-        "Nett impact = gross MTM − estimated brokerage/STT/exchange/GST/stamp. "
-        "Estimates are indicative retail F&O proxies — confirm with broker contract notes. "
-        "Day target is the nett profit required to enter the primary chase grade."
+        "Nett P&L / loss = gross MTM − brokerage − STT − exchange − SEBI − stamp − GST. "
+        "All Thesis grades and day targets use this nett figure. "
+        "Fee model is an indicative retail F&O proxy — confirm with Dhan contract notes."
     )
 
     def to_dict(self) -> dict[str, Any]:

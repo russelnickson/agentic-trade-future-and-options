@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +20,7 @@ from dashboard.components.agent_journal import (
     load_strategy_snapshot,
     seed_sample_session,
 )
+from dashboard.components.console_runtime import session_clock
 from dashboard.secrets_store import apply_secrets_to_environ
 from dashboard.timefmt import format_ist
 from database.redis_client import RedisClient
@@ -57,6 +59,10 @@ st.caption(
 with st.sidebar:
     st.subheader("Insights")
     symbol = st.selectbox("Underlying", ["NIFTY", "BANKNIFTY"])
+    clock = session_clock()
+    live_desk = clock.is_live_desk or clock.phase in {"PRE_OPEN", "OPEN", "CLOSING"}
+    auto_live = st.toggle("Live refresh (market hours)", value=live_desk)
+    tick_sec = st.select_slider("Tick seconds", options=[5, 10, 30], value=10)
     if st.button("Refresh top 5 strategies", type="primary", use_container_width=True):
         with st.spinner("Backtesting day strategies on Dhan history…"):
             payload = refresh_top_strategies(symbol, redis_client=client, top_n=5)
@@ -87,11 +93,12 @@ if strategies is None:
             st.error(f"Backtest failed: {exc}")
             strategies = None
 
-# ----- Top 5 strategies -----
-st.subheader(f"Top 5 strategies for the day · {symbol}")
-if not strategies or not strategies.get("strategies"):
-    st.warning("No strategy ranking yet. Click **Refresh top 5 strategies**.")
-else:
+
+def _render_strategy_panel(strategies: dict | None) -> None:
+    st.subheader(f"Top 5 strategies for the day · {symbol}")
+    if not strategies or not strategies.get("strategies"):
+        st.warning("No strategy ranking yet. Click **Refresh top 5 strategies**.")
+        return
     meta1, meta2, meta3, meta4 = st.columns(4)
     meta1.metric("Last close", f"{strategies.get('last_close') or '—'}")
     vol = strategies.get("vol20")
@@ -102,6 +109,23 @@ else:
         f"As of {format_ist(strategies.get('asof'), seconds=True)} · "
         f"{strategies.get('disclaimer') or ''}"
     )
+
+
+if auto_live and live_desk:
+
+    @st.fragment(run_every=timedelta(seconds=int(tick_sec)))
+    def _live_insights() -> None:
+        fresh = load_strategies(symbol, redis_client=client) or strategies
+        clock_now = session_clock()
+        st.caption(f"Live · {clock_now.phase} · {clock_now.now_ist}")
+        _render_strategy_panel(fresh)
+
+    _live_insights()
+else:
+    _render_strategy_panel(strategies)
+
+# ----- Strategy detail (table + expanders) -----
+if strategies and strategies.get("strategies"):
     if strategies.get("signals_used"):
         sig = ", ".join(f"{k}={v}" for k, v in strategies["signals_used"].items())
         st.caption(f"Broker speculation soft bias used: {sig}")
