@@ -71,9 +71,13 @@ def main() -> int:
     process_specs = [
         ("zmq-worker", run_zmq_worker, (endpoint, stop_event, latency_ms)),
         ("redis-cache", run_redis_cache_manager, (endpoint, stop_event)),
-        ("db-writer", run_db_writer, (endpoint, stop_event)),
         ("websocket-streamer", run_websocket_streamer, (tokens, broker, mode, stop_event)),
     ]
+    # TimescaleDB is optional on lean EC2 desks — skip so WS/Redis stay up.
+    if os.getenv("TRADE_SKIP_DB_WRITER", "").lower() not in {"1", "true", "yes"}:
+        process_specs.insert(2, ("db-writer", run_db_writer, (endpoint, stop_event)))
+    else:
+        logger.warning("TRADE_SKIP_DB_WRITER set — ticks go to Redis only (no TimescaleDB)")
 
     processes: list[mp.Process] = []
 

@@ -130,6 +130,9 @@ def _render_ticker() -> None:
     )
     achieved_gross = tick.get("gross_pnl")
     achieved_nett = tick.get("nett_pnl")
+    realized = tick.get("realized_pnl")
+    unrealized = tick.get("unrealized_pnl")
+    fees_live = float(tick.get("fees_live") or fee_total or 0)
     gap, progress = progress_to_target(achieved_nett, target_nett)
     live_grade = classify_day_outcome(
         achieved_nett,
@@ -140,10 +143,10 @@ def _render_ticker() -> None:
     ltp_s = "—" if ltp is None else f"{ltp:,.2f}"
 
     st.markdown("### Live ticker")
-    t1, t2, t3, t4, t5 = st.columns([1.2, 1, 1, 1, 1])
+    t1, t2, t3, t4, t5, t6 = st.columns([1.1, 1, 1, 0.9, 0.9, 1])
     t1.metric(f"{symbol} LTP", ltp_s)
     t2.metric(
-        "Day target (nett after fees)",
+        "Day target (nett)",
         f"₹{target_nett:+,.0f}",
         help=(
             f"Enter **{primary}** after brokerage+SEBI+STT+GST · "
@@ -161,10 +164,14 @@ def _render_ticker() -> None:
         delta_color="inverse" if (gap or 0) > 0 else "normal",
     )
     t4.metric(
-        "Achieved (gross)",
-        "—" if achieved_gross is None else f"₹{achieved_gross:+,.0f}",
+        "Realized",
+        "—" if realized is None else f"₹{float(realized):+,.0f}",
     )
-    t5.markdown(
+    t5.metric(
+        "Unrealized",
+        "—" if unrealized is None else f"₹{float(unrealized):+,.0f}",
+    )
+    t6.markdown(
         f"<div style='padding:0.65rem;border-radius:8px;background:{color}22;"
         f"border:1px solid {color}'><div style='font-size:0.7rem;color:#6B7280'>"
         f"Live grade</div><div style='font-size:1.25rem;font-weight:700;color:{color}'>"
@@ -175,13 +182,59 @@ def _render_ticker() -> None:
     pct = 0.0 if progress is None else min(float(progress), 150.0)
     st.progress(min(pct / 100.0, 1.0), text=f"Progress to day target · {pct:.0f}%")
 
+    insight = tick.get("insight") or ""
+    st.info(insight)
+
+    trades = list(tick.get("trades") or [])
+    sleeves = list(tick.get("sleeves") or [])
+    if trades or sleeves:
+        st.markdown("#### Executed trades (live)")
+        table = []
+        for t in trades:
+            table.append(
+                {
+                    "Status": t.get("status"),
+                    "Contract": t.get("symbol"),
+                    "Side": t.get("option_type") or "—",
+                    "Strike": t.get("strike"),
+                    "Qty": t.get("qty"),
+                    "Entry": t.get("entry"),
+                    "LTP": t.get("ltp"),
+                    "Realized": t.get("realized"),
+                    "Unrealized": t.get("unrealized"),
+                    "P&L": t.get("pnl"),
+                }
+            )
+        if table:
+            st.dataframe(
+                pd.DataFrame(table),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Entry": st.column_config.NumberColumn(format="%.2f"),
+                    "LTP": st.column_config.NumberColumn(format="%.2f"),
+                    "Realized": st.column_config.NumberColumn(format="%+.2f"),
+                    "Unrealized": st.column_config.NumberColumn(format="%+.2f"),
+                    "P&L": st.column_config.NumberColumn(format="%+.2f"),
+                },
+            )
+        if sleeves:
+            with st.expander("Tactical sleeves / stops", expanded=False):
+                st.dataframe(pd.DataFrame(sleeves), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No day trades booked yet — waiting for tactical fills.")
+
     pcr = tick.get("pcr")
     atm = tick.get("atm")
+    err = tick.get("pnl_error")
     st.caption(
-        f"Chase **{primary}** · fees in model ₹{fee_total:,.2f} "
+        f"Chase **{primary}** · gross ₹"
+        f"{'—' if achieved_gross is None else f'{achieved_gross:+,.0f}'} · "
+        f"live fees ₹{fees_live:,.2f} "
         f"(brokerage+SEBI+STT+exchange+stamp+GST) · "
         f"ATM {atm or '—'} · PCR {f'{pcr:.3f}' if isinstance(pcr, (int, float)) else '—'} · "
         f"tick {format_ist(tick.get('asof'))}"
+        + (f" · pnl warn: {err}" if err else "")
     )
 
 

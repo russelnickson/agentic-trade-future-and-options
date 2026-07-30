@@ -351,6 +351,135 @@ def progress_to_target(achieved_nett: float | None, target_nett: float) -> tuple
     return gap, round(pct, 1)
 
 
+def _tick_ltp(redis_client: Any, token: str | int | None) -> float | None:
+    if redis_client is None or token is None:
+        return None
+    try:
+        raw = redis_client.client.get(f"tick:{token}")
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        if not raw:
+            return None
+        if str(raw).startswith("{"):
+            data = json.loads(raw)
+            for k in ("ltp", "last_price", "last_traded_price", "LTP"):
+                if data.get(k) is not None:
+                    return float(data[k])
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _live_trade_rows(
+    *,
+    broker: str,
+    redis_client: Any | None,
+) -> tuple[list[dict[str, Any]], float, int, int]:
+    """Open + closed day positions with live LTP where available.
+
+    Returns ``(rows, premium_turnover, buy_orders, sell_orders)``.
+    """
+    rows: list[dict[str, Any]] = []
+    turnover = 0.0
+    buys = 0
+    sells = 0
+    try:
+        from services.circuit_breaker import _unwrap_list
+        from config.settings import get_settings
+
+        settings = get_settings()
+        if broker == "dhan":
+            from dhanhq import DhanContext, Portfolio
+
+            ctx = DhanContext(settings.dhan_client_id, settings.dhan_access_token)
+            payload = Portfolio(ctx).get_positions()
+            for pos in _unwrap_list(payload):
+                qty = int(pos.get("netQty") or 0)
+                buy_qty = int(pos.get("dayBuyQty") or pos.get("buyQty") or 0)
+                sell_qty = int(pos.get("daySellQty") or pos.get("sellQty") or 0)
+                realized = float(pos.get("realizedProfit") or 0)
+                unrealized = float(pos.get("unrealizedProfit") or 0)
+                if qty == 0 and buy_qty == 0 and sell_qty == 0 and not realized and not unrealized:
+                    continue
+                token = pos.get("securityId")
+                live = _tick_ltp(redis_client, token)
+                entry = float(pos.get("costPrice") or pos.get("buyAvg") or 0) or None
+                if qty < 0:
+                    entry = float(pos.get("sellAvg") or entry or 0) or entry
+                if live is None and qty != 0 and entry is not None and unrealized:
+                    live = entry + (unrealized / qty)
+                day_buy_val = float(pos.get("dayBuyValue") or 0)
+                day_sell_val = float(pos.get("daySellValue") or 0)
+                if day_buy_val or day_sell_val:
+                    turnover += abs(day_buy_val) + abs(day_sell_val)
+                else:
+                    prem = float(live or entry or 0)
+                    turnover += prem * max(abs(qty), abs(buy_qty), abs(sell_qty), 0)
+                if buy_qty > 0:
+                    buys += 1
+                elif qty > 0:
+                    buys += 1
+                if sell_qty > 0:
+                    sells += 1
+                elif qty < 0:
+                    sells += 1
+                status = (
+                    "OPEN"
+                    if qty != 0
+                    else ("CLOSED" if (buy_qty or sell_qty or realized) else "FLAT")
+                )
+                opt_raw = str(pos.get("drvOptionType") or "").upper()
+                if opt_raw in {"CALL", "CE", "C"}:
+                    opt = "CE"
+                elif opt_raw in {"PUT", "PE", "P"}:
+                    opt = "PE"
+                else:
+                    opt = None
+                rows.append(
+                    {
+                        "symbol": str(pos.get("tradingSymbol") or token or "—"),
+                        "security_id": str(token) if token is not None else None,
+                        "option_type": opt,
+                        "strike": pos.get("drvStrikePrice"),
+                        "qty": qty,
+                        "entry": entry,
+                        "ltp": None if live is None else round(float(live), 2),
+                        "realized": round(realized, 2),
+                        "unrealized": round(unrealized, 2),
+                        "pnl": round(realized + unrealized, 2),
+                        "status": status,
+                    }
+                )
+        else:
+            from dashboard.components.positions import fetch_positions
+
+            open_rows, _err = fetch_positions(broker, redis_client=redis_client)  # type: ignore[arg-type]
+            for r in open_rows or []:
+                if r.qty > 0:
+                    buys += 1
+                elif r.qty < 0:
+                    sells += 1
+                turnover += abs(float(r.ltp or r.entry_price or 0) * abs(int(r.qty)))
+                rows.append(
+                    {
+                        "symbol": r.symbol,
+                        "security_id": str(r.token) if r.token is not None else None,
+                        "option_type": r.option_type,
+                        "strike": r.strike,
+                        "qty": r.qty,
+                        "entry": r.entry_price,
+                        "ltp": r.ltp,
+                        "realized": 0.0,
+                        "unrealized": float(r.pnl or 0),
+                        "pnl": float(r.pnl or 0),
+                        "status": "OPEN",
+                    }
+                )
+    except Exception:
+        logger.debug("thesis live trade rows failed", exc_info=True)
+    return rows, turnover, max(buys, 0), max(sells, 0)
+
+
 def live_market_tick(
     symbol: str,
     *,
@@ -358,7 +487,7 @@ def live_market_tick(
     redis_client: Any | None = None,
     session_charges_total: float = 0.0,
 ) -> dict[str, Any]:
-    """Live underlying LTP + mark-to-market P&L for the thesis ticker."""
+    """Live underlying + day P&L (realized+unrealized) + executed trade insights."""
     symbol_u = symbol.strip().upper()
     ltp = None
     atm = None
@@ -371,19 +500,98 @@ def live_market_tick(
             atm = chain.get("atm_strike") or chain.get("atm")
             pcr = chain.get("pcr")
             chain_age = chain.get("asof") or chain.get("updated_at")
+            if pcr is None:
+                try:
+                    from services.oi_tracker import compute_pcr
+
+                    call_oi = put_oi = 0
+                    for sides in (chain.get("strikes") or {}).values():
+                        if not isinstance(sides, dict):
+                            continue
+                        ce = (sides.get("CE") or {}).get("oi")
+                        pe = (sides.get("PE") or {}).get("oi")
+                        if ce is not None:
+                            call_oi += int(ce)
+                        if pe is not None:
+                            put_oi += int(pe)
+                    pcr = compute_pcr(call_oi, put_oi)
+                except Exception:
+                    pass
     except Exception:
         logger.debug("thesis live chain failed", exc_info=True)
 
+    realized = 0.0
+    unrealized = 0.0
     gross = None
+    pnl_err = None
     try:
-        from dashboard.components.positions import fetch_positions
+        from services.circuit_breaker import fetch_daily_pnl
 
-        rows, _err = fetch_positions(broker, redis_client=redis_client)  # type: ignore[arg-type]
-        gross = float(sum(r.pnl for r in rows)) if rows else 0.0
+        snap = fetch_daily_pnl(broker if broker in {"dhan", "zerodha"} else "dhan")  # type: ignore[arg-type]
+        if snap.error:
+            pnl_err = snap.error
+        realized = float(snap.realized_pnl or 0)
+        unrealized = float(snap.unrealized_pnl or 0)
+        gross = float(snap.total_pnl)
+    except Exception as exc:
+        logger.debug("thesis daily pnl failed", exc_info=True)
+        pnl_err = str(exc)
+
+    trades, turnover, buys, sells = _live_trade_rows(broker=broker, redis_client=redis_client)
+
+    # Prefer live fee estimate from today's churn; fall back to thesis session model.
+    live_fees = float(session_charges_total or 0)
+    if turnover > 0 and (buys + sells) > 0:
+        live_fees = estimate_option_charges(
+            turnover,
+            buy_orders=max(buys, 1),
+            sell_orders=max(sells, 0) or (1 if buys else 0),
+        ).total
+
+    # Enrich open sleeves from day-risk book (planned stop / order id)
+    sleeves: list[dict[str, Any]] = []
+    try:
+        from services.intraday_hunt import load_day_risk
+
+        state = load_day_risk(redis_client)
+        for s in state.get("sleeves") or []:
+            if not isinstance(s, dict):
+                continue
+            sec = s.get("security_id")
+            live = _tick_ltp(redis_client, sec)
+            entry = s.get("ltp")
+            qty = int(s.get("qty") or 0)
+            upnl = None
+            if live is not None and entry is not None and qty:
+                upnl = round((float(live) - float(entry)) * qty, 2)
+            sleeves.append(
+                {
+                    "order_id": s.get("order_id"),
+                    "security_id": sec,
+                    "strike": s.get("strike"),
+                    "option_type": s.get("option_type"),
+                    "qty": qty,
+                    "entry": entry,
+                    "ltp": live,
+                    "stop_price": s.get("stop_price"),
+                    "unrealized": upnl,
+                    "stopped": bool(s.get("stopped")),
+                    "asof": s.get("asof"),
+                }
+            )
     except Exception:
-        logger.debug("thesis live positions failed", exc_info=True)
+        logger.debug("thesis day-risk sleeves failed", exc_info=True)
 
-    nett = nett_pnl(gross, session_charges_total)
+    nett = nett_pnl(gross, live_fees) if gross is not None else None
+    open_n = sum(1 for t in trades if t.get("status") == "OPEN")
+    closed_n = sum(1 for t in trades if t.get("status") == "CLOSED")
+    insight = (
+        f"{open_n} open · {closed_n} closed · "
+        f"realized ₹{realized:+,.0f} · unrealized ₹{unrealized:+,.0f}"
+    )
+    if not trades and gross == 0:
+        insight = "No executed day trades yet — capital idle vs target"
+
     return {
         "symbol": symbol_u,
         "underlying_ltp": None if ltp is None else float(ltp),
@@ -391,7 +599,14 @@ def live_market_tick(
         "pcr": pcr,
         "chain_asof": chain_age,
         "gross_pnl": None if gross is None else round(float(gross), 2),
+        "realized_pnl": round(realized, 2),
+        "unrealized_pnl": round(unrealized, 2),
         "nett_pnl": None if nett is None else round(float(nett), 2),
+        "fees_live": round(live_fees, 2),
+        "trades": trades,
+        "sleeves": sleeves,
+        "insight": insight,
+        "pnl_error": pnl_err,
         "asof": datetime.now(timezone.utc).isoformat(),
     }
 
