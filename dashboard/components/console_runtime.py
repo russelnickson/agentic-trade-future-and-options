@@ -954,6 +954,8 @@ def sync_agent_briefing(
             agent_name, role = "voices", "system"
         elif s.agent_id == "research":
             agent_name, role = "researcher", "researcher"
+        elif s.agent_id == "thesis":
+            agent_name, role = "thesis", "system"
         elif s.agent_id == "risk":
             agent_name, role = "risk", "risk"
         elif s.agent_id == "trade":
