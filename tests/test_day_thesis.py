@@ -42,10 +42,18 @@ def test_nett_subtracts_charges() -> None:
 
 def test_framework_priority_and_gross_covers_fees() -> None:
     charges = estimate_option_charges(50_000.0, buy_orders=1, sell_orders=1)
-    bands = build_framework(capital_ref=50_000.0, session_charges=charges)
+    bands = build_framework(
+        capital_ref=50_000.0,
+        session_charges=charges,
+        day_budget=5_000.0,
+    )
     assert [b.grade for b in bands] == list(GRADE_PRIORITY)
     assert bands[0].priority == 1
-    # Entering OKAY nett requires gross = nett_mid + charges
     okay = next(b for b in bands if b.grade == "OKAY")
     assert okay.gross_to_enter > okay.nett_min
     assert okay.estimated_charges_at_target == charges.total
+    acc = next(b for b in bands if b.grade == "ACCEPTABLE_LOSS")
+    assert acc.nett_min < acc.nett_max  # ordered band
+    breach = next(b for b in bands if b.grade == "BREACH")
+    d = breach.to_dict()
+    assert d["nett_min"] is None

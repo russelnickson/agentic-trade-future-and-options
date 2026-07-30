@@ -17,7 +17,6 @@ from typing import Any
 
 from config.settings import get_settings
 from dashboard.components.console_runtime import (
-    ACCEPTABLE_LOSS_PCT,
     FLAT_ABS,
     OKAY_PCT,
     PHENOMENAL_PCT,
@@ -184,23 +183,34 @@ def nett_pnl(gross: float | None, charges: float) -> float | None:
     return float(gross) - float(charges)
 
 
-def _band_edges(capital_ref: float | None) -> dict[DayGrade, tuple[float, float | None]]:
-    """Inclusive lower / exclusive-ish upper nett bounds for each grade."""
+def _band_edges(
+    capital_ref: float | None,
+    *,
+    day_budget: float,
+) -> dict[DayGrade, tuple[float | None, float | None]]:
+    """Nett bounds per grade: ``(min_inclusive, max_exclusive)``; ``None`` = open end."""
     cap = capital_ref if capital_ref and capital_ref > 0 else None
+    budget = max(float(day_budget), 1.0)
     if cap:
         phen = cap * PHENOMENAL_PCT
         okay = cap * OKAY_PCT
-        flat = max(FLAT_ABS, cap * 0.0005)
-        acc = cap * ACCEPTABLE_LOSS_PCT
+        flat_thr = max(FLAT_ABS, cap * 0.0005)
     else:
-        phen, okay, flat, acc = 15_000.0, 2_000.0, FLAT_ABS, 8_000.0
+        phen, okay, flat_thr = 15_000.0, 2_000.0, FLAT_ABS
+
+    # Acceptable loss sits between flat and the hard day budget (ensure lo < hi).
+    acc_floor = -budget
+    flat_floor = -flat_thr
+    if acc_floor >= flat_floor:
+        # Tiny budget vs flat threshold — still expose a sliver for ACCEPTABLE_LOSS.
+        acc_floor = flat_floor - max(budget, 1.0)
 
     return {
         "PHENOMENAL": (phen, None),
         "OKAY": (okay, phen),
-        "FLAT": (-flat, okay),
-        "ACCEPTABLE_LOSS": (-acc, -flat),
-        "BREACH": (float("-inf"), -acc),
+        "FLAT": (flat_floor, okay),
+        "ACCEPTABLE_LOSS": (acc_floor, flat_floor),
+        "BREACH": (None, acc_floor),
     }
 
 
@@ -208,28 +218,27 @@ def build_framework(
     *,
     capital_ref: float | None,
     session_charges: ChargeEstimate,
+    day_budget: float,
 ) -> list[GradeBand]:
-    edges = _band_edges(capital_ref)
+    edges = _band_edges(capital_ref, day_budget=day_budget)
     charges = float(session_charges.total)
     bands: list[GradeBand] = []
     for idx, grade in enumerate(GRADE_PRIORITY, start=1):
         lo, hi = edges[grade]
-        # Gross MTM required so that nett (gross − charges) sits at the band's entry.
         if grade == "PHENOMENAL":
-            target_nett = lo
+            target_nett = float(lo or 0.0)
         elif grade == "BREACH":
-            # Crossing below −acc (hi of breach edge tuple is −acc exclusive upper in our map)
-            target_nett = hi if hi is not None else -charges
+            target_nett = float(hi or -charges)
         else:
-            assert hi is not None
+            assert lo is not None and hi is not None
             target_nett = (lo + hi) / 2.0
         gross_to_enter = float(target_nett) + charges
         bands.append(
             GradeBand(
                 grade=grade,
                 priority=idx,
-                nett_min=float(lo) if lo != float("-inf") else float("-inf"),
-                nett_max=float(hi) if hi is not None else None,
+                nett_min=float("-inf") if lo is None else float(lo),
+                nett_max=None if hi is None else float(hi),
                 gross_to_enter=round(gross_to_enter, 2),
                 estimated_charges_at_target=round(charges, 2),
                 meaning=GRADE_MEANING[grade],
@@ -327,7 +336,11 @@ def build_day_thesis(
     )
     nett = nett_pnl(gross_pnl, charges.total)
     outcome = classify_day_outcome(nett, capital_ref=capital_ref)
-    framework = build_framework(capital_ref=capital_ref, session_charges=charges)
+    framework = build_framework(
+        capital_ref=capital_ref,
+        session_charges=charges,
+        day_budget=day_budget,
+    )
 
     outlook: dict[str, Any] = {}
     try:

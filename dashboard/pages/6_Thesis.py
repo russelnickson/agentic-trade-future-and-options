@@ -140,12 +140,17 @@ rows = []
 for band in thesis.get("framework") or []:
     lo = band.get("nett_min")
     hi = band.get("nett_max")
-    if lo == float("-inf") or lo == "-inf":
-        band_s = f"< ₹{hi:,.0f}" if isinstance(hi, (int, float)) else "breach"
-    elif hi is None:
-        band_s = f"≥ ₹{lo:,.0f}"
+    lo_num = lo if isinstance(lo, (int, float)) else None
+    hi_num = hi if isinstance(hi, (int, float)) else None
+    if lo_num is None and hi_num is not None:
+        band_s = f"< ₹{hi_num:,.0f}"
+    elif lo_num is not None and hi_num is None:
+        band_s = f"≥ ₹{lo_num:,.0f}"
+    elif lo_num is not None and hi_num is not None:
+        low, high = (lo_num, hi_num) if lo_num <= hi_num else (hi_num, lo_num)
+        band_s = f"₹{low:,.0f} … ₹{high:,.0f}"
     else:
-        band_s = f"₹{lo:,.0f} … ₹{hi:,.0f}"
+        band_s = "—"
     rows.append(
         {
             "Priority": band.get("priority"),
