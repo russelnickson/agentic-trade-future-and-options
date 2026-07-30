@@ -5,6 +5,7 @@ Doctrine
 - Idle cash is opportunity cost, but **never all-in**.
 - Size by confidence-weighted sleeves of ``MAX_DAILY_LOSS``.
 - Strict stop: planned loss ≤ stop_fraction × premium (default 35%).
+- Book winners: take-profit ~28% premium upside + trail lock after +15%.
 - Leave reserve for later sleeves (max capital efficiency under a hard day-loss cap).
 - One protected LIMIT BUY per sleeve; up to ``TRADE_MAX_SLEEVES`` (default 3) per day.
 """
@@ -35,6 +36,8 @@ SLEEVE_MAX = 0.28
 DAY_RISK_UTIL_CAP = 0.70
 # Planned stop as fraction of entry premium (strict loss control for long options).
 STOP_FRACTION = 0.35
+# Book profits at this premium upside (paired with profit_guard / tactical exits).
+TAKE_PROFIT_FRACTION = 0.28
 # Max premium notional vs available margin (capital efficiency, not margin blow-up).
 MARGIN_PREMIUM_CAP = 0.15
 
@@ -84,6 +87,33 @@ def stop_fraction() -> float:
     except ValueError:
         return STOP_FRACTION
 
+
+def take_profit_frac() -> float:
+    try:
+        from services.profit_guard import take_profit_fraction
+
+        return float(take_profit_fraction())
+    except Exception:
+        return TAKE_PROFIT_FRACTION
+
+
+def open_sleeves(state: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Sleeves still on risk (not stopped / exited / reconciled)."""
+    out: list[dict[str, Any]] = []
+    for s in (state or {}).get("sleeves") or []:
+        if not isinstance(s, dict):
+            continue
+        if s.get("stopped") or s.get("exited") or s.get("closed_reconcile"):
+            continue
+        out.append(s)
+    return out
+
+
+def recompute_deployed_risk(state: dict[str, Any]) -> float:
+    return round(
+        sum(float(s.get("planned_risk") or 0.0) for s in open_sleeves(state)),
+        2,
+    )
 
 def sleeve_weight(confidence: float | None) -> float:
     """Map strategy confidence → probabilistic share of day-loss budget (not all-in)."""
@@ -147,10 +177,12 @@ def remaining_risk_budget(client: RedisClient | None) -> dict[str, Any]:
     """How much day-loss budget is left for the next sleeve."""
     mdl = max_daily_loss()
     state = load_day_risk(client)
-    deployed = float(state.get("deployed_risk") or 0.0)
+    # Always derive from open sleeves so closed/profit exits free capacity.
+    deployed = recompute_deployed_risk(state)
+    state["deployed_risk"] = deployed
     util_cap = mdl * DAY_RISK_UTIL_CAP
     remaining = max(0.0, util_cap - deployed)
-    n = len(state.get("sleeves") or [])
+    n = len(open_sleeves(state))
     return {
         "max_daily_loss": mdl,
         "util_cap": util_cap,
@@ -449,6 +481,7 @@ def build_hunt_plan(
             "sizing": sizing,
             "budget": budget,
             "stop_price": round(ltp * (1.0 - float(sizing["stop_fraction"])), 2),
+            "target_price": round(ltp * (1.0 + take_profit_frac()), 2),
         }
 
     return {
@@ -534,16 +567,22 @@ def execute_hunt(
             {
                 "order_id": result.order_id,
                 "security_id": plan.get("security_id"),
+                "trading_symbol": plan.get("trading_symbol"),
                 "strike": plan.get("strike"),
                 "option_type": plan.get("option_type"),
                 "qty": plan.get("qty"),
                 "planned_risk": planned,
                 "ltp": plan.get("ltp"),
+                "entry_ltp": plan.get("ltp"),
+                "peak_ltp": plan.get("ltp"),
                 "stop_price": plan.get("stop_price"),
+                "target_price": plan.get("target_price")
+                or round(float(plan.get("ltp") or 0) * (1.0 + take_profit_frac()), 2),
                 "asof": datetime.now(IST).isoformat(),
             }
         )
         state["sleeves"] = sleeves
+        state["deployed_risk"] = recompute_deployed_risk(state)
         save_day_risk(client, state)
         payload["day_risk"] = state
 

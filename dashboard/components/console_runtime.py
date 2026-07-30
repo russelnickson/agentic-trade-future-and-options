@@ -575,6 +575,62 @@ def _compose_trade_decision(
         "max_sleeves": budget["max_sleeves"],
     }
 
+    # Live manage open sleeves toward take-profit / trail (tactical owns exits)
+    open_manage: list[dict[str, Any]] = []
+    try:
+        from services.intraday_hunt import load_day_risk, open_sleeves
+
+        for s in open_sleeves(load_day_risk(client)):
+            entry = float(s.get("entry_ltp") or s.get("ltp") or 0)
+            last = s.get("last_ltp")
+            pct = s.get("unrealized_pct")
+            open_manage.append(
+                {
+                    "security_id": s.get("security_id"),
+                    "option_type": s.get("option_type"),
+                    "strike": s.get("strike"),
+                    "qty": s.get("qty"),
+                    "entry": entry or None,
+                    "ltp": last,
+                    "stop": s.get("stop_price"),
+                    "target": s.get("target_price"),
+                    "peak": s.get("peak_ltp"),
+                    "trail_armed": bool(s.get("trail_armed")),
+                    "unrealized_pct": pct,
+                }
+            )
+    except Exception:
+        open_manage = []
+    if open_manage:
+        meta_base["open_sleeves"] = open_manage
+        bits = []
+        for m in open_manage[:3]:
+            side = m.get("option_type") or "?"
+            strike = m.get("strike") or "?"
+            pct = m.get("unrealized_pct")
+            tgt = m.get("target")
+            bits.append(
+                f"{int(strike) if isinstance(strike, (int, float)) else strike}{side}"
+                f"{'' if pct is None else f' {float(pct):+.1f}%'}"
+                f"{'' if tgt is None else f' →tp {tgt}'}"
+            )
+        return (
+            "Trade: MANAGE open sleeves — trail/lock profits at reasonable upside; "
+            "hard take-profit armed. "
+            + " · ".join(bits),
+            {
+                "kind": "MANAGE",
+                "summary": (
+                    f"MANAGE — {len(open_manage)} open · "
+                    + " · ".join(bits)
+                )[:240],
+                "rationale": rationale,
+                "confidence": 0.82,
+                "status": "PROPOSED",
+                "meta": meta_base,
+            },
+        )
+
     # Prefer LangGraph strategic directive when fresh
     try:
         from services.strategic_controller.directive import load_directive
@@ -734,7 +790,7 @@ def _compose_trade_decision(
         f"{int(plan['strike'])}{plan['option_type']} @~{plan['ltp']:.2f} · "
         f"risk ₹{float(sizing.get('planned_risk') or 0):,.0f} "
         f"({float(sizing.get('sleeve_weight') or 0):.0%} of day loss) · "
-        f"stop ~{plan.get('stop_price')}"
+        f"stop ~{plan.get('stop_price')} · tp ~{plan.get('target_price')}"
     )
     msg = (
         f"Trade: EXECUTE sized sleeve (not all-in) — {summary}. "
@@ -756,6 +812,7 @@ def _compose_trade_decision(
             "lots",
             "reason",
             "stop_price",
+            "target_price",
             "sizing",
         )
         if k in plan
