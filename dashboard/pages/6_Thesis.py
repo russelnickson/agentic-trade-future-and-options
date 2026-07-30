@@ -1,8 +1,9 @@
-"""Thesis — nett-impact day framework (PHENOMENAL → BREACH)."""
+"""Thesis — nett-impact day framework with live target vs achieved ticker."""
 
 from __future__ import annotations
 
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -14,11 +15,17 @@ if str(_ROOT) not in sys.path:
 
 from dashboard.auth import render_sidebar_profile, require_login
 from dashboard.components.capital import fetch_capital
+from dashboard.components.console_runtime import classify_day_outcome
 from dashboard.components.positions import fetch_positions
 from dashboard.secrets_store import apply_secrets_to_environ
 from dashboard.timefmt import format_ist
 from database.redis_client import RedisClient
-from services.day_thesis import load_thesis, refresh_day_thesis
+from services.day_thesis import (
+    live_market_tick,
+    load_thesis,
+    progress_to_target,
+    refresh_day_thesis,
+)
 
 st.set_page_config(
     page_title="Thesis · Trade Console",
@@ -55,14 +62,15 @@ client = _redis()
 
 st.title("Thesis")
 st.caption(
-    "Agent consolidates the desk into a **nett-impact** day framework — "
-    "priority **PHENOMENAL → OKAY → FLAT → ACCEPTABLE_LOSS → BREACH** after trade charges."
+    "Live **target profit vs achieved** (nett of charges) — "
+    "priority **PHENOMENAL → OKAY → FLAT → ACCEPTABLE_LOSS → BREACH**, ticking with the market."
 )
 
 with st.sidebar:
     st.subheader("Thesis")
     symbol = st.selectbox("Underlying", ["NIFTY", "BANKNIFTY", "FINNIFTY"])
     broker = st.selectbox("Broker (P&L / capital)", ["dhan", "zerodha"])
+    refresh_sec = st.select_slider("Live tick (sec)", options=[2, 5, 10, 30], value=5)
     turnover = st.number_input(
         "Premium turnover proxy (₹)",
         min_value=0.0,
@@ -90,8 +98,8 @@ with st.sidebar:
                 redis_client=client,
             )
         st.success(
-            f"Primary target **{payload.get('primary_target')}** · "
-            f"now **{payload.get('current_grade')}**"
+            f"Target nett ₹{payload.get('target_profit_nett'):+,.0f} · "
+            f"chase **{payload.get('primary_target')}**"
         )
         st.rerun()
     st.caption("Persists to `data/insights/day_thesis_*.json` · Redis `agent:thesis:today`.")
@@ -101,39 +109,85 @@ if not thesis:
     st.info("No thesis yet — click **Rebuild thesis** in the sidebar.")
     st.stop()
 
-current = str(thesis.get("current_grade") or "NO_DATA")
+target_nett = float(thesis.get("target_profit_nett") or 0)
+target_gross = float(thesis.get("target_profit_gross") or 0)
 primary = str(thesis.get("primary_target") or "OKAY")
-color = GRADE_COLORS.get(current, "#6B7280")
-
-c1, c2, c3, c4 = st.columns(4)
-c1.markdown(
-    f"<div style='padding:0.75rem;border-radius:8px;background:{color}22;"
-    f"border:1px solid {color}'><div style='font-size:0.75rem;color:#6B7280'>"
-    f"Current (nett)</div><div style='font-size:1.4rem;font-weight:700;color:{color}'>"
-    f"{current}</div></div>",
-    unsafe_allow_html=True,
-)
-c2.metric("Primary chase", primary)
-gross = thesis.get("current_gross_pnl")
-nett = thesis.get("current_nett_pnl")
-c3.metric(
-    "Gross MTM",
-    "—" if gross is None else f"₹{gross:,.0f}",
-)
-c4.metric(
-    "Nett impact",
-    "—" if nett is None else f"₹{nett:,.0f}",
-    help="Gross − estimated session charges",
-)
-
 charges = thesis.get("session_charges") or {}
-m1, m2, m3 = st.columns(3)
-m1.metric("Capital ref", f"₹{float(thesis.get('capital_ref') or 0):,.0f}")
-m2.metric("Day loss budget", f"₹{float(thesis.get('day_budget') or 0):,.0f}")
-m3.metric("Est. session charges", f"₹{float(charges.get('total') or 0):,.2f}")
+fee_total = float(charges.get("total") or 0)
+capital_ref = float(thesis.get("capital_ref") or 0)
 
+
+@st.fragment(run_every=timedelta(seconds=int(refresh_sec)))
+def live_ticker() -> None:
+    tick = live_market_tick(
+        symbol,
+        broker=broker,
+        redis_client=client,
+        session_charges_total=fee_total,
+    )
+    achieved_gross = tick.get("gross_pnl")
+    achieved_nett = tick.get("nett_pnl")
+    gap, progress = progress_to_target(achieved_nett, target_nett)
+    live_grade = classify_day_outcome(
+        achieved_nett,
+        capital_ref=capital_ref or None,
+    ).grade
+    color = GRADE_COLORS.get(str(live_grade), "#6B7280")
+    ltp = tick.get("underlying_ltp")
+    ltp_s = "—" if ltp is None else f"{ltp:,.2f}"
+
+    st.markdown("### Live ticker")
+    t1, t2, t3, t4, t5 = st.columns([1.2, 1, 1, 1, 1])
+    t1.metric(f"{symbol} LTP", ltp_s)
+    t2.metric(
+        "Day target (nett)",
+        f"₹{target_nett:+,.0f}",
+        help=f"Enter **{primary}** after fees · gross ≈ ₹{target_gross:+,.0f}",
+    )
+    t3.metric(
+        "Achieved (nett)",
+        "—" if achieved_nett is None else f"₹{achieved_nett:+,.0f}",
+        delta=(
+            None
+            if gap is None
+            else (f"gap ₹{gap:+,.0f}" if gap > 0 else f"ahead ₹{abs(gap):,.0f}")
+        ),
+        delta_color="inverse" if (gap or 0) > 0 else "normal",
+    )
+    t4.metric(
+        "Achieved (gross)",
+        "—" if achieved_gross is None else f"₹{achieved_gross:+,.0f}",
+    )
+    t5.markdown(
+        f"<div style='padding:0.65rem;border-radius:8px;background:{color}22;"
+        f"border:1px solid {color}'><div style='font-size:0.7rem;color:#6B7280'>"
+        f"Live grade</div><div style='font-size:1.25rem;font-weight:700;color:{color}'>"
+        f"{live_grade}</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    pct = 0.0 if progress is None else min(float(progress), 150.0)
+    st.progress(min(pct / 100.0, 1.0), text=f"Progress to day target · {pct:.0f}%")
+
+    pcr = tick.get("pcr")
+    atm = tick.get("atm")
+    st.caption(
+        f"Chase **{primary}** · fees in model ₹{fee_total:,.2f} · "
+        f"ATM {atm or '—'} · PCR {f'{pcr:.3f}' if isinstance(pcr, (int, float)) else '—'} · "
+        f"tick {format_ist(tick.get('asof'))}"
+    )
+
+
+live_ticker()
+
+st.divider()
 st.markdown("### Consolidation")
 st.write(thesis.get("consolidation") or "")
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Capital ref", f"₹{capital_ref:,.0f}")
+m2.metric("Day loss budget", f"₹{float(thesis.get('day_budget') or 0):,.0f}")
+m3.metric("Est. session charges", f"₹{fee_total:,.2f}")
 
 st.markdown("### Priority framework (nett of charges)")
 rows = []
@@ -151,6 +205,7 @@ for band in thesis.get("framework") or []:
         band_s = f"₹{low:,.0f} … ₹{high:,.0f}"
     else:
         band_s = "—"
+    marker = "← target" if band.get("grade") == primary else ""
     rows.append(
         {
             "Priority": band.get("priority"),
@@ -158,6 +213,7 @@ for band in thesis.get("framework") or []:
             "Nett band": band_s,
             "Gross to hit": f"₹{float(band.get('gross_to_enter') or 0):,.0f}",
             "Fees in model": f"₹{float(band.get('estimated_charges_at_target') or 0):,.2f}",
+            "": marker,
             "Playbook": band.get("playbook"),
         }
     )
@@ -192,4 +248,4 @@ if strat:
     st.dataframe(pd.DataFrame(strat), use_container_width=True, hide_index=True)
 
 asof = thesis.get("asof")
-st.caption(f"asof {format_ist(asof) if asof else '—'} · symbol {thesis.get('symbol')}")
+st.caption(f"thesis built {format_ist(asof) if asof else '—'} · symbol {thesis.get('symbol')}")

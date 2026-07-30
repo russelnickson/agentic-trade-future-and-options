@@ -53,7 +53,23 @@ def test_framework_priority_and_gross_covers_fees() -> None:
     assert okay.gross_to_enter > okay.nett_min
     assert okay.estimated_charges_at_target == charges.total
     acc = next(b for b in bands if b.grade == "ACCEPTABLE_LOSS")
-    assert acc.nett_min < acc.nett_max  # ordered band
+    assert acc.nett_min < acc.nett_max
     breach = next(b for b in bands if b.grade == "BREACH")
-    d = breach.to_dict()
-    assert d["nett_min"] is None
+    assert breach.to_dict()["nett_min"] is None
+
+
+def test_day_target_and_progress() -> None:
+    from services.day_thesis import progress_to_target, resolve_day_profit_target
+
+    charges = estimate_option_charges(20_000.0)
+    bands = build_framework(
+        capital_ref=50_000.0,
+        session_charges=charges,
+        day_budget=5_000.0,
+    )
+    nett_t, gross_t = resolve_day_profit_target(bands, "OKAY")
+    assert nett_t > 0
+    assert gross_t > nett_t
+    gap, pct = progress_to_target(nett_t / 2, nett_t)
+    assert gap is not None and gap > 0
+    assert pct is not None and 40 <= pct <= 60

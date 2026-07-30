@@ -107,11 +107,16 @@ class DayThesis:
     current_grade: DayGrade
     framework: list[GradeBand] = field(default_factory=list)
     primary_target: DayGrade = "OKAY"
+    target_profit_nett: float = 0.0
+    target_profit_gross: float = 0.0
+    gap_to_target_nett: float | None = None
+    progress_pct: float | None = None
     consolidation: str = ""
     sources: dict[str, Any] = field(default_factory=dict)
     disclaimer: str = (
         "Nett impact = gross MTM − estimated brokerage/STT/exchange/GST/stamp. "
-        "Estimates are indicative retail F&O proxies — confirm with broker contract notes."
+        "Estimates are indicative retail F&O proxies — confirm with broker contract notes. "
+        "Day target is the nett profit required to enter the primary chase grade."
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -302,6 +307,96 @@ def _consolidate_narrative(
     )
 
 
+def resolve_day_profit_target(
+    framework: list[GradeBand],
+    primary: DayGrade,
+) -> tuple[float, float]:
+    """
+    Day profit target = nett needed to **enter** the primary chase grade.
+
+    Returns ``(target_nett, target_gross)``.
+    """
+    by_grade = {b.grade: b for b in framework}
+    band = by_grade.get(primary) or by_grade.get("OKAY") or framework[0]
+    if primary == "PHENOMENAL":
+        target_nett = float(band.nett_min if band.nett_min != float("-inf") else 0.0)
+    elif primary == "BREACH":
+        # Escape hatch: climb back to ACCEPTABLE_LOSS ceiling
+        acc = by_grade.get("ACCEPTABLE_LOSS")
+        target_nett = float(acc.nett_max) if acc and acc.nett_max is not None else 0.0
+    elif primary == "FLAT":
+        target_nett = 0.0
+    else:
+        # OKAY / ACCEPTABLE_LOSS — enter at band floor (nett_min)
+        target_nett = float(band.nett_min if band.nett_min != float("-inf") else 0.0)
+        if primary == "ACCEPTABLE_LOSS" and band.nett_max is not None:
+            # Aim for top of acceptable-loss (closest to flat), not the breach wall
+            target_nett = float(band.nett_max)
+    target_gross = float(band.gross_to_enter)
+    # Prefer consistent gross = nett + fees from this band's fee model
+    fees = float(band.estimated_charges_at_target)
+    target_gross = target_nett + fees
+    return round(target_nett, 2), round(target_gross, 2)
+
+
+def progress_to_target(achieved_nett: float | None, target_nett: float) -> tuple[float | None, float | None]:
+    """Return ``(gap_to_target, progress_pct)`` where progress is 0–100+ toward target."""
+    if achieved_nett is None:
+        return None, None
+    gap = round(float(target_nett) - float(achieved_nett), 2)
+    if target_nett <= 0:
+        # Flat / loss-repair targets: 100% when achieved >= target
+        pct = 100.0 if achieved_nett >= target_nett else max(0.0, min(99.0, 50.0 + achieved_nett))
+        return gap, round(pct, 1)
+    pct = max(0.0, (float(achieved_nett) / float(target_nett)) * 100.0)
+    return gap, round(pct, 1)
+
+
+def live_market_tick(
+    symbol: str,
+    *,
+    broker: str = "dhan",
+    redis_client: Any | None = None,
+    session_charges_total: float = 0.0,
+) -> dict[str, Any]:
+    """Live underlying LTP + mark-to-market P&L for the thesis ticker."""
+    symbol_u = symbol.strip().upper()
+    ltp = None
+    atm = None
+    pcr = None
+    chain_age = None
+    try:
+        if redis_client is not None:
+            chain = redis_client.get_option_chain_state(symbol_u) or {}
+            ltp = chain.get("underlying_ltp")
+            atm = chain.get("atm_strike") or chain.get("atm")
+            pcr = chain.get("pcr")
+            chain_age = chain.get("asof") or chain.get("updated_at")
+    except Exception:
+        logger.debug("thesis live chain failed", exc_info=True)
+
+    gross = None
+    try:
+        from dashboard.components.positions import fetch_positions
+
+        rows, _err = fetch_positions(broker, redis_client=redis_client)  # type: ignore[arg-type]
+        gross = float(sum(r.pnl for r in rows)) if rows else 0.0
+    except Exception:
+        logger.debug("thesis live positions failed", exc_info=True)
+
+    nett = nett_pnl(gross, session_charges_total)
+    return {
+        "symbol": symbol_u,
+        "underlying_ltp": None if ltp is None else float(ltp),
+        "atm": atm,
+        "pcr": pcr,
+        "chain_asof": chain_age,
+        "gross_pnl": None if gross is None else round(float(gross), 2),
+        "nett_pnl": None if nett is None else round(float(nett), 2),
+        "asof": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def build_day_thesis(
     symbol: str = "NIFTY",
     *,
@@ -385,6 +480,9 @@ def build_day_thesis(
     if outcome.grade == "NO_DATA":
         primary = "OKAY"
 
+    target_nett, target_gross = resolve_day_profit_target(framework, primary)
+    gap, progress = progress_to_target(nett, target_nett)
+
     narrative = _consolidate_narrative(
         symbol=symbol.strip().upper(),
         current_grade=outcome.grade,
@@ -395,6 +493,10 @@ def build_day_thesis(
         outlook=outlook,
         strategies=strategies,
         speculation=speculation,
+    )
+    narrative = (
+        f"{narrative} Day target nett ₹{target_nett:+,.0f} "
+        f"(gross ≈ ₹{target_gross:+,.0f} incl. fees)."
     )
 
     return DayThesis(
@@ -408,6 +510,10 @@ def build_day_thesis(
         current_grade=outcome.grade,
         framework=framework,
         primary_target=primary,
+        target_profit_nett=target_nett,
+        target_profit_gross=target_gross,
+        gap_to_target_nett=gap,
+        progress_pct=progress,
         consolidation=narrative,
         sources={
             "outlook": outlook,
