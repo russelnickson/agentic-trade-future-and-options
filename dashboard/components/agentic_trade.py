@@ -24,22 +24,28 @@ TACTICAL_STATE_KEY = "agent:tactical:state"
 DIRECTIVE_KEY = "agent:strategy:directive"
 
 AGENT_AVATARS: dict[str, str] = {
-    "user": "🧑‍💼",
-    "orchestrator": "◈",
+    "user": "👤",
+    "orchestrator": "🧭",
     "scout": "🔭",
     "voices": "📡",
     "researcher": "🔬",
     "thesis": "📜",
-    "risk": "🛡",
+    "risk": "🛡️",
     "execution": "⚡",
     "tactical": "🎯",
     "strategic": "🧠",
-    "system": "◇",
+    "system": "💬",
 }
 
 
 def agent_avatar(agent: str) -> str:
-    return AGENT_AVATARS.get(str(agent).lower(), "·")
+    """Return a Streamlit-safe emoji avatar (non-emoji glyphs are treated as image paths)."""
+    return AGENT_AVATARS.get(str(agent).lower().strip(), "💬")
+
+
+def chat_role(agent: str) -> str:
+    """Streamlit chat_message name — keep user vs assistant for layout."""
+    return "user" if str(agent).lower().strip() == "user" else "assistant"
 
 
 def _json_get(client: RedisClient | None, key: str) -> dict[str, Any] | None:

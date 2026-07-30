@@ -16,6 +16,7 @@ if str(_ROOT) not in sys.path:
 from dashboard.auth import render_sidebar_profile, require_login
 from dashboard.components.agentic_trade import (
     agent_avatar,
+    chat_role,
     load_agentic_feed,
     load_live_desk_context,
     publish_operator_turn,
@@ -178,7 +179,7 @@ def _render_chat(events: list[dict], *, show_decisions: bool, show_insights: boo
         agent = str(ev.get("agent") or "system")
         ts = format_ist(ev.get("timestamp"))
         status = str(ev.get("status") or "")
-        with st.chat_message(agent if agent != "user" else "user", avatar=agent_avatar(agent)):
+        with st.chat_message(chat_role(agent), avatar=agent_avatar(agent)):
             meta = f"`{ts}` · **{agent}**"
             if kind != "chat":
                 meta = f"{meta} · `{kind}`"
