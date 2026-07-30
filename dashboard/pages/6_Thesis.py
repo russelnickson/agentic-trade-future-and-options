@@ -185,41 +185,177 @@ def _render_ticker() -> None:
     insight = tick.get("insight") or ""
     st.info(insight)
 
+    orders = list(tick.get("orders") or [])
     trades = list(tick.get("trades") or [])
     sleeves = list(tick.get("sleeves") or [])
-    if trades or sleeves:
+    fee_legs = tick.get("fee_legs") or {}
+
+    if orders or trades or sleeves:
         st.markdown("#### Executed trades (live)")
-        table = []
-        for t in trades:
-            table.append(
-                {
-                    "Status": t.get("status"),
-                    "Contract": t.get("symbol"),
-                    "Side": t.get("option_type") or "—",
-                    "Strike": t.get("strike"),
-                    "Qty": t.get("qty"),
-                    "Entry": t.get("entry"),
-                    "LTP": t.get("ltp"),
-                    "Realized": t.get("realized"),
-                    "Unrealized": t.get("unrealized"),
-                    "P&L": t.get("pnl"),
-                }
-            )
-        if table:
+        if orders:
+            order_rows = []
+            for o in orders:
+                flow = o.get("premium_flow")
+                fees = o.get("fees")
+                order_rows.append(
+                    {
+                        "Time": o.get("time") or "—",
+                        "Order": str(o.get("order_id") or "")[-8:],
+                        "Status": o.get("status"),
+                        "Side": o.get("side"),
+                        "Contract": o.get("symbol"),
+                        "Opt": o.get("option_type") or "—",
+                        "Strike": o.get("strike"),
+                        "Filled": o.get("filled"),
+                        "Avg": o.get("avg"),
+                        "Premium flow": flow,
+                        "Brokerage": o.get("brokerage"),
+                        "STT": o.get("stt"),
+                        "Exch": o.get("exchange"),
+                        "SEBI": o.get("sebi"),
+                        "Stamp": o.get("stamp"),
+                        "GST": o.get("gst"),
+                        "Fees": fees,
+                        "Tag": o.get("tag") or "—",
+                        "Reason": o.get("reason") or "—",
+                    }
+                )
+            odf = pd.DataFrame(order_rows)
+
+            def _style_orders(df: pd.DataFrame):
+                styles = pd.DataFrame("", index=df.index, columns=df.columns)
+
+                def _pnl_color(val: object) -> str:
+                    try:
+                        num = float(val)  # type: ignore[arg-type]
+                    except (TypeError, ValueError):
+                        return ""
+                    if num > 0:
+                        return "color: #0a7a32; font-weight: 600"
+                    if num < 0:
+                        return "color: #c62828; font-weight: 600"
+                    return "color: #666666"
+
+                def _side_color(val: object) -> str:
+                    text = str(val or "").upper()
+                    if text == "BUY":
+                        return "color: #0a7a32; font-weight: 600"
+                    if text == "SELL":
+                        return "color: #c62828; font-weight: 600"
+                    return ""
+
+                def _status_color(val: object) -> str:
+                    text = str(val or "").upper()
+                    if text in {"TRADED", "COMPLETE", "FILLED"}:
+                        return "color: #0a7a32; font-weight: 600"
+                    if text in {"REJECTED", "CANCELLED"}:
+                        return "color: #c62828; font-weight: 600"
+                    if text in {"PENDING", "TRANSIT", "OPEN"}:
+                        return "color: #b26a00; font-weight: 600"
+                    return ""
+
+                if "Premium flow" in df.columns:
+                    styles["Premium flow"] = df["Premium flow"].map(_pnl_color)
+                if "Fees" in df.columns:
+                    styles["Fees"] = df["Fees"].map(
+                        lambda v: "color: #c62828" if float(v or 0) > 0 else ""
+                    )
+                if "Side" in df.columns:
+                    styles["Side"] = df["Side"].map(_side_color)
+                if "Status" in df.columns:
+                    styles["Status"] = df["Status"].map(_status_color)
+                return styles
+
             st.dataframe(
-                pd.DataFrame(table),
+                odf.style.apply(_style_orders, axis=None).format(
+                    {
+                        "Avg": "{:.2f}",
+                        "Premium flow": "{:+.2f}",
+                        "Brokerage": "{:.2f}",
+                        "STT": "{:.2f}",
+                        "Exch": "{:.2f}",
+                        "SEBI": "{:.2f}",
+                        "Stamp": "{:.2f}",
+                        "GST": "{:.2f}",
+                        "Fees": "{:.2f}",
+                    },
+                    na_rep="—",
+                ),
                 use_container_width=True,
                 hide_index=True,
-                column_config={
-                    "Entry": st.column_config.NumberColumn(format="%.2f"),
-                    "LTP": st.column_config.NumberColumn(format="%.2f"),
-                    "Realized": st.column_config.NumberColumn(format="%+.2f"),
-                    "Unrealized": st.column_config.NumberColumn(format="%+.2f"),
-                    "P&L": st.column_config.NumberColumn(format="%+.2f"),
-                },
+                height=min(420, 48 + 36 * max(len(odf), 1)),
             )
+            if fee_legs:
+                f1, f2, f3, f4, f5, f6, f7 = st.columns(7)
+                f1.metric("Brokerage", f"₹{float(fee_legs.get('brokerage') or 0):,.2f}")
+                f2.metric("STT", f"₹{float(fee_legs.get('stt') or 0):,.2f}")
+                f3.metric("Exchange", f"₹{float(fee_legs.get('exchange') or 0):,.2f}")
+                f4.metric("SEBI", f"₹{float(fee_legs.get('sebi') or 0):,.2f}")
+                f5.metric("Stamp", f"₹{float(fee_legs.get('stamp') or 0):,.2f}")
+                f6.metric("GST", f"₹{float(fee_legs.get('gst') or 0):,.2f}")
+                f7.metric("Fees total", f"₹{float(fee_legs.get('total') or 0):,.2f}")
+            st.caption(
+                "Premium flow: SELL credits green · BUY debits red. "
+                "Fees are NSE options proxies (brokerage+STT+exchange+SEBI+stamp+GST). "
+                "Reason maps hunt / TP / trail / stop tags + sleeve book."
+            )
+
+        if trades:
+            with st.expander("Position roll-up (net by contract)", expanded=False):
+                pos_rows = []
+                for t in trades:
+                    pos_rows.append(
+                        {
+                            "Status": t.get("status"),
+                            "Contract": t.get("symbol"),
+                            "Side": t.get("option_type") or "—",
+                            "Strike": t.get("strike"),
+                            "Net qty": t.get("qty"),
+                            "Entry": t.get("entry"),
+                            "LTP": t.get("ltp"),
+                            "Realized": t.get("realized"),
+                            "Unrealized": t.get("unrealized"),
+                            "P&L": t.get("pnl"),
+                        }
+                    )
+                pdf = pd.DataFrame(pos_rows)
+
+                def _style_pos(df: pd.DataFrame):
+                    styles = pd.DataFrame("", index=df.index, columns=df.columns)
+
+                    def _c(val: object) -> str:
+                        try:
+                            num = float(val)  # type: ignore[arg-type]
+                        except (TypeError, ValueError):
+                            return ""
+                        if num > 0:
+                            return "color: #0a7a32; font-weight: 600"
+                        if num < 0:
+                            return "color: #c62828; font-weight: 600"
+                        return ""
+
+                    for col in ("Realized", "Unrealized", "P&L"):
+                        if col in df.columns:
+                            styles[col] = df[col].map(_c)
+                    return styles
+
+                st.dataframe(
+                    pdf.style.apply(_style_pos, axis=None).format(
+                        {
+                            "Entry": "{:.2f}",
+                            "LTP": "{:.2f}",
+                            "Realized": "{:+.2f}",
+                            "Unrealized": "{:+.2f}",
+                            "P&L": "{:+.2f}",
+                        },
+                        na_rep="—",
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
         if sleeves:
-            with st.expander("Tactical sleeves / stops", expanded=False):
+            with st.expander("Tactical sleeves / stops / targets", expanded=False):
                 st.dataframe(pd.DataFrame(sleeves), use_container_width=True, hide_index=True)
     else:
         st.caption("No day trades booked yet — waiting for tactical fills.")
@@ -230,6 +366,8 @@ def _render_ticker() -> None:
     st.caption(
         f"Chase **{primary}** · gross ₹"
         f"{'—' if achieved_gross is None else f'{achieved_gross:+,.0f}'} · "
+        f"nett after fees ₹"
+        f"{'—' if achieved_nett is None else f'{achieved_nett:+,.0f}'} · "
         f"live fees ₹{fees_live:,.2f} "
         f"(brokerage+SEBI+STT+exchange+stamp+GST) · "
         f"ATM {atm or '—'} · PCR {f'{pcr:.3f}' if isinstance(pcr, (int, float)) else '—'} · "
