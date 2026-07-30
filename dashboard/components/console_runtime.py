@@ -609,24 +609,33 @@ def _compose_trade_decision(
             strike = m.get("strike") or "?"
             pct = m.get("unrealized_pct")
             tgt = m.get("target")
+            stop = m.get("stop")
+            trail = " trail✓" if m.get("trail_armed") else ""
             bits.append(
                 f"{int(strike) if isinstance(strike, (int, float)) else strike}{side}"
                 f"{'' if pct is None else f' {float(pct):+.1f}%'}"
                 f"{'' if tgt is None else f' →tp {tgt}'}"
+                f"{'' if stop is None else f' stop {stop}'}"
+                f"{trail}"
             )
         return (
-            "Trade: MANAGE open sleeves — trail/lock profits at reasonable upside; "
-            "hard take-profit armed. "
+            "Trade: MANAGE — tactical owns exits (TP ~+28% / trail arm ~+15%). "
+            "Console stance only — not a broker order. "
             + " · ".join(bits),
             {
                 "kind": "MANAGE",
                 "summary": (
                     f"MANAGE — {len(open_manage)} open · "
                     + " · ".join(bits)
+                    + " · tactical watching"
                 )[:240],
-                "rationale": rationale,
+                "rationale": (
+                    f"{rationale} · Execution owner=tactical_executor; "
+                    "exit only on take-profit, trail stop, or hard stop — "
+                    "MANAGE rows are live monitoring, not pending orders."
+                ),
                 "confidence": 0.82,
-                "status": "PROPOSED",
+                "status": "ACTIVE",
                 "meta": meta_base,
             },
         )
@@ -715,16 +724,20 @@ def _compose_trade_decision(
     if not budget["can_hunt"]:
         return (
             "Trade: day-loss sleeve budget utilised — MANAGE open risk toward decent close "
-            f"({day.grade}). Deployed ₹{budget['deployed_risk']:,.0f} / cap ₹{budget['util_cap']:,.0f}.",
+            f"({day.grade}). Deployed ₹{budget['deployed_risk']:,.0f} / cap ₹{budget['util_cap']:,.0f}. "
+            "Tactical still owns stops/TP; console is not placing exits here.",
             {
                 "kind": "MANAGE",
                 "summary": (
                     f"MANAGE — risk budget {budget['deployed_risk']:.0f}/{budget['util_cap']:.0f} "
-                    f"· sleeves {budget['sleeves']}/{budget['max_sleeves']}"
+                    f"· sleeves {budget['sleeves']}/{budget['max_sleeves']} · tactical watching"
                 )[:240],
-                "rationale": rationale,
+                "rationale": (
+                    f"{rationale} · Budget full — no new ENTRY; "
+                    "open risk managed by tactical_executor."
+                ),
                 "confidence": 0.8,
-                "status": "PROPOSED",
+                "status": "ACTIVE",
                 "meta": {**meta_base, "entry_lock": lock_st.get("lock")},
             },
         )

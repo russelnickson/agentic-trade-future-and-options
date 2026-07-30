@@ -310,10 +310,12 @@ def _render_sidebar(client: RedisClient | None) -> tuple[str, int, dict, str]:
         st.divider()
         st.caption("Deep pages")
         st.markdown(
+            "- **Agentic Trade** (desk conversation)\n"
             "- Agents\n"
             "- Insights\n"
             "- Global Outlook\n"
             "- Live Market\n"
+            "- Thesis\n"
             "- Settings"
         )
 

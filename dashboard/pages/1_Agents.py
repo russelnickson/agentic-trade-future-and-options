@@ -69,7 +69,8 @@ clock = session_clock()
 st.title("Agents")
 st.caption(
     f"{clock.phase} · {clock.label} — Scout, Voices, Research, and Risk debate facts; "
-    "**Trade** decides so the day can close decent."
+    "**Trade** decides so the day can close decent. "
+    "Prefer **Agentic Trade** for the full chat + operator replies."
 )
 
 live_desk = clock.is_live_desk or clock.phase in {"PRE_OPEN", "OPEN", "CLOSING"}

@@ -41,6 +41,7 @@ DecisionKind = Literal[
     "SQUARE_OFF",
     "ADJUST",
     "OBSERVE",
+    "MANAGE",
 ]
 
 
@@ -294,6 +295,96 @@ def load_strategy_snapshot(redis_client: RedisClient | None = None) -> dict[str,
             logger.debug("Failed reading strategy snapshot", exc_info=True)
     insights, _ = load_insights(redis_client, limit=1)
     return insights[0] if insights else None
+
+
+def _parse_ts(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def build_desk_timeline(
+    redis_client: RedisClient | None = None,
+    *,
+    limit: int = 120,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Merge conversations, decisions, and insights into one chronological desk feed.
+
+    Returns (events ascending by time, source map).
+    """
+    conv, c_src = load_conversations(redis_client, limit=limit)
+    decs, d_src = load_decisions(redis_client, limit=limit)
+    insights, i_src = load_insights(redis_client, limit=max(20, limit // 4))
+    events: list[dict[str, Any]] = []
+
+    for row in conv:
+        events.append(
+            {
+                "kind": "chat",
+                "timestamp": row.get("timestamp"),
+                "agent": row.get("agent") or "system",
+                "role": row.get("role") or "system",
+                "message": row.get("message") or "",
+                "tags": list(row.get("tags") or []),
+                "raw": row,
+            }
+        )
+    for row in decs:
+        conf = row.get("confidence")
+        conf_s = f" · conf {float(conf):.2f}" if conf not in (None, "") else ""
+        status = str(row.get("status") or "PROPOSED")
+        kind = str(row.get("kind") or "OBSERVE")
+        summary = str(row.get("summary") or "")
+        rationale = str(row.get("rationale") or "").strip()
+        msg = f"[{kind} · {status}{conf_s}] {summary}"
+        if rationale:
+            msg = f"{msg}\n_{rationale[:280]}_"
+        events.append(
+            {
+                "kind": "decision",
+                "timestamp": row.get("timestamp"),
+                "agent": row.get("agent") or "execution",
+                "role": "execution",
+                "message": msg,
+                "status": status,
+                "decision_kind": kind,
+                "symbol": row.get("symbol"),
+                "confidence": conf,
+                "raw": row,
+            }
+        )
+    for row in insights:
+        title = str(row.get("title") or "Insight")
+        outlook = str(row.get("outlook") or "")
+        plan = str(row.get("strategy_for_tomorrow") or "")
+        body = f"**{title}**\n{outlook}"
+        if plan:
+            body = f"{body}\nTomorrow: {plan}"
+        events.append(
+            {
+                "kind": "insight",
+                "timestamp": row.get("timestamp"),
+                "agent": row.get("agent") or "researcher",
+                "role": "researcher",
+                "message": body,
+                "raw": row,
+            }
+        )
+
+    events.sort(key=lambda e: _parse_ts(e.get("timestamp")))
+    if len(events) > limit:
+        events = events[-limit:]
+    return events, {
+        "conversations": c_src,
+        "decisions": d_src,
+        "insights": i_src,
+    }
 
 
 def seed_sample_session(redis_client: RedisClient | None = None) -> None:

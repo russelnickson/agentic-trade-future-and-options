@@ -318,6 +318,12 @@ def evaluate_exits(
         )
         actions.append(action)
         dirty = True
+        try:
+            from dashboard.components.agentic_trade import announce_tactical_exit
+
+            announce_tactical_exit(action, redis_client=client, symbol=symbol)
+        except Exception:
+            logger.debug("tactical exit announce skipped", exc_info=True)
 
     if dirty:
         state["deployed_risk"] = recompute_deployed_risk(state)
