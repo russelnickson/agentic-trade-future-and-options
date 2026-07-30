@@ -312,28 +312,27 @@ def resolve_day_profit_target(
     primary: DayGrade,
 ) -> tuple[float, float]:
     """
-    Day profit target = nett needed to **enter** the primary chase grade.
+    Day profit target = nett needed for a productive close.
 
-    Returns ``(target_nett, target_gross)``.
+    Uses the primary chase when it is OKAY/PHENOMENAL; otherwise defaults to
+    entering **OKAY** so FLAT/repair modes still show a positive day target.
     """
     by_grade = {b.grade: b for b in framework}
-    band = by_grade.get(primary) or by_grade.get("OKAY") or framework[0]
-    if primary == "PHENOMENAL":
+    okay = by_grade.get("OKAY")
+    phen = by_grade.get("PHENOMENAL")
+    if primary == "PHENOMENAL" and phen is not None:
+        band = phen
         target_nett = float(band.nett_min if band.nett_min != float("-inf") else 0.0)
-    elif primary == "BREACH":
-        # Escape hatch: climb back to ACCEPTABLE_LOSS ceiling
-        acc = by_grade.get("ACCEPTABLE_LOSS")
-        target_nett = float(acc.nett_max) if acc and acc.nett_max is not None else 0.0
-    elif primary == "FLAT":
-        target_nett = 0.0
+    elif primary == "OKAY" and okay is not None:
+        band = okay
+        target_nett = float(band.nett_min if band.nett_min != float("-inf") else 0.0)
+    elif okay is not None:
+        # FLAT / ACCEPTABLE_LOSS / BREACH / NO_DATA — still aim for OKAY nett profit
+        band = okay
+        target_nett = float(band.nett_min if band.nett_min != float("-inf") else 0.0)
     else:
-        # OKAY / ACCEPTABLE_LOSS — enter at band floor (nett_min)
+        band = framework[0]
         target_nett = float(band.nett_min if band.nett_min != float("-inf") else 0.0)
-        if primary == "ACCEPTABLE_LOSS" and band.nett_max is not None:
-            # Aim for top of acceptable-loss (closest to flat), not the breach wall
-            target_nett = float(band.nett_max)
-    target_gross = float(band.gross_to_enter)
-    # Prefer consistent gross = nett + fees from this band's fee model
     fees = float(band.estimated_charges_at_target)
     target_gross = target_nett + fees
     return round(target_nett, 2), round(target_gross, 2)
