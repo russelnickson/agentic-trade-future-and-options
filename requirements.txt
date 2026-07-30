@@ -18,7 +18,7 @@ fastapi
 uvicorn[standard]
 pytest
 ntplib
-streamlit
+plotly>=5.18
 yfinance>=1.0
 feedparser>=6.0
 langgraph>=0.2

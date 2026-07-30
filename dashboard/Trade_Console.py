@@ -25,6 +25,7 @@ from dashboard.components.console_runtime import (
     session_clock,
     sync_agent_briefing,
 )
+from dashboard.components.fleet_radars import build_fleet_radar_scores, render_fleet_radars
 from dashboard.components.orders import render_orders_table
 from dashboard.components.positions import fetch_positions, render_positions_table
 from dashboard.components.risk_controls import (
@@ -486,6 +487,18 @@ def _render_main(symbol: str, controls: dict, broker: str) -> None:
             logger.warning("Briefing sync failed: %s", exc)
 
     _render_agents(statuses)
+
+    try:
+        radar_scores = build_fleet_radar_scores(
+            client=client,
+            symbol=symbol,
+            day=day,
+            controls=controls or {},
+            trading_disabled=disabled,
+        )
+        render_fleet_radars(radar_scores)
+    except Exception as exc:
+        logger.warning("Fleet radar render failed: %s", exc)
 
     st.divider()
     c_disc, c_book = st.columns([1.15, 1])
