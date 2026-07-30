@@ -89,6 +89,14 @@ AGENT_FLEET: tuple[AgentSpec, ...] = (
         "#6B4F9A",
     ),
     AgentSpec(
+        "thesis",
+        "Thesis",
+        "thesis",
+        "TODAY only — consolidate Scout/Voices/Research/Risk into nett-impact day grades "
+        "(PHENOMENAL→OKAY→FLAT→ACCEPTABLE_LOSS→BREACH) after trade charges",
+        "#0E7490",
+    ),
+    AgentSpec(
         "risk",
         "Risk",
         "risk",

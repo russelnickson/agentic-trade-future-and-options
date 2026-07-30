@@ -54,6 +54,7 @@ def _agent_badge(agent: str) -> str:
         "scout": "◆",
         "voices": "◆",
         "researcher": "◆",
+        "thesis": "◆",
         "risk": "◆",
         "execution": "◆",
         "system": "◇",

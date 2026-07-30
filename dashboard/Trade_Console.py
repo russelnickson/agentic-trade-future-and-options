@@ -519,6 +519,7 @@ def _render_main(symbol: str, controls: dict, broker: str) -> None:
 | **ACCEPTABLE_LOSS** | Small loss inside budget — still decent |
 | **BREACH** | Beyond budget — Trade must cut |
 
+See **Thesis** for the same ladder on **nett impact** (after trade charges).
 The fleet’s job is to discuss **critical facts** (global bias, direct voices, chain/PCR, risk)
 and let **Trade** decide so the session closes on one of the first four outcomes whenever possible.
 """
