@@ -824,6 +824,31 @@ def build_agent_statuses(
             f"{research_detail} · Soft SPEC: {speculation.get('headline')}"
         ).strip(" ·")
 
+    thesis_status = "IDLE"
+    thesis_headline = "No day thesis yet — open Thesis · Rebuild"
+    thesis_detail = ""
+    try:
+        from services.day_thesis import load_thesis
+
+        thesis = load_thesis(symbol, redis_client=client) or {}
+        if thesis:
+            thesis_status = "LIVE"
+            target = thesis.get("target_profit_nett")
+            achieved = thesis.get("current_nett_pnl")
+            primary = thesis.get("primary_target") or "OKAY"
+            grade = thesis.get("current_grade") or "NO_DATA"
+            target_s = f"₹{float(target):+,.0f}" if isinstance(target, (int, float)) else "—"
+            achieved_s = (
+                f"₹{float(achieved):+,.0f}" if isinstance(achieved, (int, float)) else "—"
+            )
+            thesis_headline = (
+                f"Target {target_s} nett · achieved {achieved_s} · chase {primary}"
+            )
+            thesis_detail = str(thesis.get("consolidation") or "")[:220]
+            thesis_detail = f"Grade {grade}. {thesis_detail}".strip()
+    except Exception:
+        logger.debug("thesis status load failed", exc_info=True)
+
     draft_msg, draft_dec = _compose_trade_decision(
         symbol=symbol,
         clock=session_clock(),
@@ -845,6 +870,7 @@ def build_agent_statuses(
         "scout": (outlook.get("status", "IDLE"), outlook.get("headline", ""), outlook.get("detail", "")),
         "voices": (voices.get("status", "IDLE"), voices.get("headline", ""), voices.get("detail", "")),
         "research": (research_status, research_headline, research_detail),
+        "thesis": (thesis_status, thesis_headline, thesis_detail),
         "risk": (risk_status, risk_headline, risk_detail),
         "trade": (trade_status, trade_headline, trade_detail),
     }
