@@ -88,10 +88,91 @@ def load_live_desk_context(
             f"{'' if pct is None else f'{float(pct):+.1f}%'} "
             f"ltp {m.get('ltp')} tp {tgt} stop {stop} ({trail})"
         )
+
+    thesis: dict[str, Any] = {}
+    try:
+        from services.day_thesis import load_thesis
+
+        thesis = load_thesis(symbol, redis_client=client) or {}
+    except Exception:
+        logger.debug("agentic thesis load failed", exc_info=True)
+
+    insight: dict[str, Any] = {}
+    try:
+        from dashboard.components.agent_journal import load_strategy_snapshot
+
+        insight = load_strategy_snapshot(client) or {}
+    except Exception:
+        logger.debug("agentic insight load failed", exc_info=True)
+
+    conf_candidates: list[float] = []
+    d_conf = directive.get("confidence")
+    if d_conf is not None:
+        try:
+            conf_candidates.append(float(d_conf))
+        except (TypeError, ValueError):
+            pass
+    for s in (thesis.get("sources") or {}).get("strategies") or []:
+        if isinstance(s, dict) and s.get("confidence") is not None:
+            try:
+                conf_candidates.append(float(s["confidence"]))
+            except (TypeError, ValueError):
+                pass
+    if manage:
+        # Open risk with trail armed → elevated conviction to stay managed
+        conf_candidates.append(0.82)
+    confidence = max(conf_candidates) if conf_candidates else None
+    if confidence is not None and confidence > 1.0:
+        confidence = confidence / 100.0
+
+    conviction = str(thesis.get("consolidation") or "").strip()
+    if not conviction:
+        hint = str(directive.get("strategy_hint") or "").strip()
+        conviction = (
+            f"{directive.get('stance') or '—'} · {directive.get('regime') or '—'}/"
+            f"{directive.get('sentiment') or '—'}"
+            + (f" — {hint}" if hint else "")
+        )
+
+    learning_parts: list[str] = []
+    if insight.get("why"):
+        learning_parts.append(str(insight["why"]).strip())
+    elif insight.get("outlook"):
+        learning_parts.append(str(insight["outlook"]).strip())
+    if insight.get("strategy_for_tomorrow"):
+        learning_parts.append(f"Tomorrow: {str(insight['strategy_for_tomorrow']).strip()}")
+    grade = thesis.get("current_grade")
+    nett = thesis.get("current_nett_pnl")
+    target = thesis.get("target_profit_nett")
+    if grade and grade != "NO_DATA":
+        learning_parts.insert(
+            0,
+            f"Day grade {grade}"
+            + (f" · nett ₹{float(nett):+,.0f}" if isinstance(nett, (int, float)) else "")
+            + (
+                f" vs target ₹{float(target):+,.0f}"
+                if isinstance(target, (int, float))
+                else ""
+            ),
+        )
+    if exits:
+        learning_parts.append(
+            f"Tactical exits today: "
+            + ", ".join(str(e.get("action") or e) for e in exits[:3])
+        )
+    if not learning_parts and manage:
+        learning_parts.append(
+            "Live sleeve in manage — learning locks in on exit (TP / trail / stop)."
+        )
+    if not learning_parts:
+        learning_parts.append("No closed-book lesson yet — capital idle or first mark pending.")
+
     return {
         "symbol": symbol.upper(),
         "tactical": tactical,
         "directive": directive,
+        "thesis": thesis,
+        "insight": insight,
         "manage": manage,
         "exits": exits,
         "entry": entry,
@@ -101,6 +182,14 @@ def load_live_desk_context(
         "sentiment": directive.get("sentiment") or "—",
         "strategy_hint": directive.get("strategy_hint") or "",
         "allow_new": bool((directive.get("risk") or {}).get("allow_new_entries", False)),
+        "confidence": confidence,
+        "conviction": conviction,
+        "primary_target": thesis.get("primary_target") or "OKAY",
+        "current_grade": thesis.get("current_grade") or "NO_DATA",
+        "nett_pnl": thesis.get("current_nett_pnl"),
+        "target_nett": thesis.get("target_profit_nett"),
+        "progress_pct": thesis.get("progress_pct"),
+        "learning": " ".join(learning_parts)[:520],
     }
 
 
@@ -144,9 +233,31 @@ def _compose_agent_replies(
             f"Heard — routing to the desk on {symbol}. "
             f"Strategic={stance} ({regime}/{sentiment}); "
             f"open sleeves={len(manage)}; new entries "
-            f"{'allowed' if allow_new else 'blocked'}.",
+            f"{'allowed' if allow_new else 'blocked'}."
+            + (
+                f" Confidence {float(ctx['confidence']):.0%}."
+                if ctx.get("confidence") is not None
+                else ""
+            ),
         )
     ]
+
+    if ctx.get("conviction"):
+        replies.append(
+            (
+                "thesis",
+                "system",
+                f"Conviction: {str(ctx.get('conviction'))[:320]}",
+            )
+        )
+    if ctx.get("learning"):
+        replies.append(
+            (
+                "researcher",
+                "researcher",
+                f"Learning today: {str(ctx.get('learning'))[:320]}",
+            )
+        )
 
     if manage:
         replies.append(
