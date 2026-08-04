@@ -164,16 +164,26 @@ def gather_market(state: StrategicState) -> StrategicState:
 
 
 def classify_regime(state: StrategicState) -> StrategicState:
-    """Map tape + outlook into a coarse regime."""
+    """Map tape + outlook into a coarse regime.
+
+    Strong directional outlook scores are TREND_UP/DOWN — not HIGH_VOL.
+    HIGH_VOL is reserved for explicit high-volatility speculation without a
+    clear directional bias (so we do not freeze hunting on a bullish open).
+    """
     pcr = state.get("pcr")
     bias = (state.get("outlook_bias") or "").upper()
     score = float(state.get("outlook_score") or 0)
     spec = state.get("speculation_signals") or {}
+    vol_high = isinstance(spec.get("volatility"), str) and "high" in str(
+        spec.get("volatility")
+    ).lower()
 
     regime = "UNKNOWN"
     if not state.get("chain_live"):
         regime = "UNKNOWN"
-    elif abs(score) >= 4 or (isinstance(spec.get("volatility"), str) and "high" in str(spec.get("volatility")).lower()):
+    elif vol_high and abs(score) < 2.5 and not (
+        bias.startswith("BULL") or bias.startswith("BEAR")
+    ):
         regime = "HIGH_VOL"
     elif bias.startswith("BULL") and (pcr is None or pcr >= 0.95):
         regime = "TREND_UP"
@@ -181,10 +191,12 @@ def classify_regime(state: StrategicState) -> StrategicState:
         regime = "TREND_DOWN"
     elif pcr is not None and 0.85 <= pcr <= 1.25 and abs(score) < 2.5:
         regime = "RANGE"
-    elif bias.startswith("BULL"):
+    elif bias.startswith("BULL") or score >= 1.5:
         regime = "TREND_UP"
-    elif bias.startswith("BEAR"):
+    elif bias.startswith("BEAR") or score <= -1.5:
         regime = "TREND_DOWN"
+    elif vol_high:
+        regime = "HIGH_VOL"
     else:
         regime = "RANGE"
 
@@ -260,6 +272,16 @@ def enforce_risk_limits(state: StrategicState) -> StrategicState:
         # Scale sleeve with confidence but never all-in
         max_sleeve = min(max_sleeve, 0.12 + float(conf) * 0.16)
 
+    # Aggressive desk day: allow slightly larger sleeves when entries are open
+    # (still capped; solid stop is enforced by TRADE_STOP_FRACTION on tactical).
+    if allow and (os.getenv("TRADE_AGGRESSIVE") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        max_sleeve = min(0.32, max(max_sleeve, 0.22))
+
     risk = {
         "max_daily_loss": mdl,
         "allow_new_entries": allow,
@@ -283,10 +305,22 @@ def decide_stance(state: StrategicState) -> StrategicState:
         hint = str(risk.get("reason") or "risk hold")
         conf = 0.85
     elif regime == "HIGH_VOL":
-        stance = "REDUCE"
-        side = "NONE"
-        hint = "High-vol regime — reduce / no fresh risk"
-        conf = 0.7
+        # Still hunt when bias is clear — smaller sleeve via risk.max_sleeve_weight.
+        if sentiment == "BULLISH":
+            stance = "HUNT"
+            side = "CE"
+            hint = "High-vol · directional BULL — reduced-size CE hunt, solid stop"
+            conf = 0.62
+        elif sentiment == "BEARISH":
+            stance = "HUNT"
+            side = "PE"
+            hint = "High-vol · directional BEAR — reduced-size PE hunt, solid stop"
+            conf = 0.62
+        else:
+            stance = "REDUCE"
+            side = "NONE"
+            hint = "High-vol · no clear side — reduce / no fresh risk"
+            conf = 0.7
     elif regime == "UNKNOWN" or not state.get("chain_live"):
         stance = "HOLD"
         side = "NONE"

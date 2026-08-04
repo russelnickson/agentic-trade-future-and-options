@@ -91,8 +91,8 @@ live_desk = clock.is_live_desk or clock.phase in {"PRE_OPEN", "OPEN", "CLOSING"}
 
 st.title("Global Outlook")
 st.caption(
-    "Overseas markers, GIFT/India proxies, commodities, FX, and FII/DII flows "
-    "that shape the India open — with a composite bias prior for NIFTY price action."
+    "DhanHQ India / GIFT / MCX / USDINR markers plus NSE FII/DII — "
+    "composite open bias prior for NIFTY (no Yahoo)."
 )
 
 with st.sidebar:
@@ -100,7 +100,7 @@ with st.sidebar:
     auto_live = st.toggle("Live refresh (market hours)", value=live_desk)
     tick_sec = st.select_slider("Tick seconds", options=[10, 30, 60], value=30)
     if st.button("Refresh all markers", type="primary", use_container_width=True):
-        with st.spinner("Pulling Dhan · Yahoo · NSE FII/DII…"):
+        with st.spinner("Pulling Dhan indices · MCX · USDINR · NSE FII/DII…"):
             try:
                 snap = refresh_global_outlook()
                 st.success(f"Updated · bias **{snap.bias}** (score {snap.score:+.2f})")
@@ -108,7 +108,7 @@ with st.sidebar:
                 st.error(f"Refresh failed: {exc}")
         st.rerun()
     st.caption(
-        "Sources: Dhan (NIFTY / VIX / GIFT / MCX), Yahoo (US·EU·Asia·FX), "
+        "Sources: Dhan (NIFTY · Sensex · GIFT · India VIX · MCX · USDINR FUT), "
         "NSE FII/DII cash. Cached under `data/global/`."
     )
 
@@ -192,7 +192,7 @@ if not markers.empty:
         if col in view.columns:
             view[col] = pd.to_numeric(view[col], errors="coerce")
 
-    region_order = ["US", "ASIA", "EU", "FX", "CMDTY", "INDIA"]
+    region_order = ["ASIA", "INDIA", "CMDTY", "FX"]
     tabs = st.tabs([r for r in region_order if r in set(view["region"].astype(str))] + ["All"])
     shown = [r for r in region_order if r in set(view["region"].astype(str))]
     for tab, region in zip(tabs[:-1], shown):
@@ -270,8 +270,10 @@ st.divider()
 st.markdown(
     """
 **How to use this page**
-1. Refresh after US close / before India open (≈ 08:00–09:10 IST).
+1. Refresh after GIFT move / before India open (≈ 08:00–09:10 IST).
 2. Treat composite bias as an **open-auction prior**, not a trade signal.
 3. Confirm with live India VIX, PCR, and first 15-minute range on the main dashboard.
+4. All price markers are **DhanHQ** (paid). Hang Seng / Nasdaq / US VIX are not on Dhan —
+   GIFT Nifty + India VIX cover that overnight / fear role.
 """
 )
