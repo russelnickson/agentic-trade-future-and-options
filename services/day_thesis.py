@@ -114,9 +114,9 @@ class DayThesis:
     consolidation: str = ""
     sources: dict[str, Any] = field(default_factory=dict)
     disclaimer: str = (
-        "Nett impact = gross MTM − estimated brokerage/STT/exchange/GST/stamp. "
-        "Estimates are indicative retail F&O proxies — confirm with broker contract notes. "
-        "Day target is the nett profit required to enter the primary chase grade."
+        "Nett P&L / loss = gross MTM − brokerage − STT − exchange − SEBI − stamp − GST. "
+        "All Thesis grades and day targets use this nett figure. "
+        "Fee model is an indicative retail F&O proxy — confirm with Dhan contract notes."
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -351,6 +351,340 @@ def progress_to_target(achieved_nett: float | None, target_nett: float) -> tuple
     return gap, round(pct, 1)
 
 
+def _tag_reason(tag: str | None, *, side: str, status: str) -> str:
+    t = str(tag or "").strip().upper()
+    if t in {"INTRA_HUNT", "HUNT"}:
+        return "Tactical hunt ENTRY — sized debit sleeve"
+    if t in {"TACT_TP", "TP"}:
+        return "Take-profit EXIT — booked at target upside"
+    if t in {"TACT_TRAIL", "TRAIL"}:
+        return "Trail EXIT — locked gains after peak giveback"
+    if t in {"TACT_STOP", "STOP"}:
+        return "Stop-loss EXIT — protective premium floor hit"
+    if t.startswith("FORCE_FLAT") or t == "FORCE_EXIT":
+        return "Forced flatten — desk restart / manual square-off"
+    if t == "SYNC":
+        return "Synced open from broker book"
+    if status in {"REJECTED", "CANCELLED"}:
+        return f"{status.title()} — no fill"
+    if side == "BUY":
+        return "BUY fill — long option premium"
+    if side == "SELL":
+        return "SELL fill — exit / reduce long"
+    return "Broker order"
+
+
+def _sleeve_reason_map(redis_client: Any | None) -> dict[str, str]:
+    """Map order_id → human reason from day-risk sleeves."""
+    out: dict[str, str] = {}
+    if redis_client is None:
+        return out
+    try:
+        from services.intraday_hunt import load_day_risk
+
+        state = load_day_risk(redis_client)
+        for s in (state.get("sleeves") or []) + (state.get("closed_sleeves") or []):
+            if not isinstance(s, dict):
+                continue
+            oid = str(s.get("order_id") or "")
+            if oid:
+                side = s.get("option_type") or "?"
+                strike = s.get("strike")
+                out[oid] = (
+                    f"Hunt sleeve {strike}{side} · stop {s.get('stop_price')} · "
+                    f"tp {s.get('target_price')}"
+                )
+            exit_oid = str(s.get("exit_order_id") or s.get("stop_order_id") or "")
+            if exit_oid:
+                reason = str(s.get("exit_reason") or "EXIT")
+                pct = s.get("exit_pnl_pct")
+                out[exit_oid] = (
+                    f"{reason} · exit LTP {s.get('exit_ltp')}"
+                    + (f" · {pct:+.1f}%" if isinstance(pct, (int, float)) else "")
+                )
+    except Exception:
+        logger.debug("sleeve reason map failed", exc_info=True)
+    return out
+
+
+def _live_order_ledger(
+    *,
+    broker: str,
+    redis_client: Any | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Full day order book with per-leg fee proxy and reasoning."""
+    orders: list[dict[str, Any]] = []
+    fee_sum = {
+        "brokerage": 0.0,
+        "stt": 0.0,
+        "exchange": 0.0,
+        "sebi": 0.0,
+        "stamp": 0.0,
+        "gst": 0.0,
+        "total": 0.0,
+    }
+    reasons = _sleeve_reason_map(redis_client)
+    try:
+        from services.circuit_breaker import _unwrap_list
+        from config.settings import get_settings
+
+        settings = get_settings()
+        raw_orders: list[dict[str, Any]] = []
+        if broker == "dhan":
+            from dhanhq import DhanContext, Order
+
+            ctx = DhanContext(settings.dhan_client_id, settings.dhan_access_token)
+            payload = Order(ctx).get_order_list()
+            raw_orders = _unwrap_list(payload)
+        else:
+            from kiteconnect import KiteConnect
+
+            token = settings.zerodha_access_token or ""
+            if token:
+                kite = KiteConnect(api_key=settings.zerodha_api_key)
+                kite.set_access_token(token)
+                raw_orders = [o for o in (kite.orders() or []) if isinstance(o, dict)]
+
+        for o in raw_orders:
+            if broker == "dhan":
+                oid = str(o.get("orderId") or o.get("order_id") or "")
+                status = str(o.get("orderStatus") or o.get("status") or "").upper()
+                side = str(o.get("transactionType") or "").upper()
+                symbol = str(o.get("tradingSymbol") or o.get("securityId") or "—")
+                qty = int(o.get("quantity") or 0)
+                filled = int(o.get("filledQty") or 0)
+                price = float(o.get("price") or 0)
+                avg = float(o.get("averageTradedPrice") or 0) or price
+                tag = str(o.get("correlationId") or o.get("tag") or "")
+                when = str(o.get("exchangeTime") or o.get("updateTime") or o.get("createTime") or "")
+                opt = str(o.get("drvOptionType") or "").upper()
+                strike = o.get("drvStrikePrice")
+                sec = str(o.get("securityId") or "")
+                note = str(o.get("omsErrorDescription") or "")
+            else:
+                oid = str(o.get("order_id") or "")
+                status = str(o.get("status") or "").upper()
+                side = str(o.get("transaction_type") or "").upper()
+                symbol = str(o.get("tradingsymbol") or "—")
+                qty = int(o.get("quantity") or 0)
+                filled = int(o.get("filled_quantity") or 0)
+                price = float(o.get("price") or 0)
+                avg = float(o.get("average_price") or 0) or price
+                tag = str(o.get("tag") or "")
+                when = str(o.get("order_timestamp") or o.get("exchange_timestamp") or "")
+                opt = ""
+                strike = None
+                sec = str(o.get("instrument_token") or "")
+                note = str(o.get("status_message") or "")
+
+            if not oid:
+                continue
+            # Normalize option side label
+            if opt in {"CALL", "CE", "C"}:
+                opt_s = "CE"
+            elif opt in {"PUT", "PE", "P"}:
+                opt_s = "PE"
+            else:
+                opt_s = None
+
+            traded = status in {"TRADED", "COMPLETE", "FILLED"} or filled > 0
+            fill_qty = filled if filled > 0 else (qty if traded else 0)
+            notional = abs(avg * fill_qty) if fill_qty and avg else 0.0
+            buys = 1 if side == "BUY" and fill_qty else 0
+            sells = 1 if side == "SELL" and fill_qty else 0
+            fees = (
+                estimate_option_charges(notional, buy_orders=buys, sell_orders=sells)
+                if notional > 0
+                else None
+            )
+            fee_total = float(fees.total) if fees else 0.0
+            if fees:
+                for k in fee_sum:
+                    if k == "total":
+                        fee_sum[k] += fees.total
+                    else:
+                        fee_sum[k] += float(getattr(fees, k, 0) or 0)
+
+            # Gross P&L attribution is at position level; per fill show signed premium flow
+            premium_flow = round(avg * fill_qty * (-1 if side == "BUY" else 1), 2) if fill_qty else 0.0
+            reason = reasons.get(oid) or _tag_reason(tag, side=side, status=status)
+            if note and note not in {"TRADE CONFIRMED", "0", "CONFIRMED", "NA"} and status in {
+                "REJECTED",
+                "CANCELLED",
+                "TRANSIT",
+                "PENDING",
+            }:
+                reason = f"{reason} · {note[:120]}"
+
+            orders.append(
+                {
+                    "time": when,
+                    "order_id": oid,
+                    "status": status,
+                    "side": side,
+                    "symbol": symbol,
+                    "option_type": opt_s,
+                    "strike": strike,
+                    "security_id": sec or None,
+                    "qty": qty,
+                    "filled": fill_qty,
+                    "price": round(price, 2) if price else None,
+                    "avg": round(avg, 2) if avg else None,
+                    "premium_flow": premium_flow,
+                    "brokerage": round(fees.brokerage, 2) if fees else 0.0,
+                    "stt": round(fees.stt, 2) if fees else 0.0,
+                    "exchange": round(fees.exchange, 2) if fees else 0.0,
+                    "sebi": round(fees.sebi, 2) if fees else 0.0,
+                    "stamp": round(fees.stamp, 2) if fees else 0.0,
+                    "gst": round(fees.gst, 2) if fees else 0.0,
+                    "fees": round(fee_total, 2),
+                    "tag": tag if tag and tag != "NA" else None,
+                    "reason": reason,
+                }
+            )
+
+        # Newest first
+        def _sort_key(row: dict[str, Any]) -> str:
+            return str(row.get("time") or "")
+
+        orders.sort(key=_sort_key, reverse=True)
+    except Exception:
+        logger.debug("thesis order ledger failed", exc_info=True)
+
+    for k, v in list(fee_sum.items()):
+        fee_sum[k] = round(float(v), 2)
+    return orders, fee_sum
+
+
+def _tick_ltp(redis_client: Any, token: str | int | None) -> float | None:
+    if redis_client is None or token is None:
+        return None
+    try:
+        raw = redis_client.client.get(f"tick:{token}")
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        if not raw:
+            return None
+        if str(raw).startswith("{"):
+            data = json.loads(raw)
+            for k in ("ltp", "last_price", "last_traded_price", "LTP"):
+                if data.get(k) is not None:
+                    return float(data[k])
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _live_trade_rows(
+    *,
+    broker: str,
+    redis_client: Any | None,
+) -> tuple[list[dict[str, Any]], float, int, int]:
+    """Open + closed day positions with live LTP where available.
+
+    Returns ``(rows, premium_turnover, buy_orders, sell_orders)``.
+    """
+    rows: list[dict[str, Any]] = []
+    turnover = 0.0
+    buys = 0
+    sells = 0
+    try:
+        from services.circuit_breaker import _unwrap_list
+        from config.settings import get_settings
+
+        settings = get_settings()
+        if broker == "dhan":
+            from dhanhq import DhanContext, Portfolio
+
+            ctx = DhanContext(settings.dhan_client_id, settings.dhan_access_token)
+            payload = Portfolio(ctx).get_positions()
+            for pos in _unwrap_list(payload):
+                qty = int(pos.get("netQty") or 0)
+                buy_qty = int(pos.get("dayBuyQty") or pos.get("buyQty") or 0)
+                sell_qty = int(pos.get("daySellQty") or pos.get("sellQty") or 0)
+                realized = float(pos.get("realizedProfit") or 0)
+                unrealized = float(pos.get("unrealizedProfit") or 0)
+                if qty == 0 and buy_qty == 0 and sell_qty == 0 and not realized and not unrealized:
+                    continue
+                token = pos.get("securityId")
+                live = _tick_ltp(redis_client, token)
+                entry = float(pos.get("costPrice") or pos.get("buyAvg") or 0) or None
+                if qty < 0:
+                    entry = float(pos.get("sellAvg") or entry or 0) or entry
+                if live is None and qty != 0 and entry is not None and unrealized:
+                    live = entry + (unrealized / qty)
+                day_buy_val = float(pos.get("dayBuyValue") or 0)
+                day_sell_val = float(pos.get("daySellValue") or 0)
+                if day_buy_val or day_sell_val:
+                    turnover += abs(day_buy_val) + abs(day_sell_val)
+                else:
+                    prem = float(live or entry or 0)
+                    turnover += prem * max(abs(qty), abs(buy_qty), abs(sell_qty), 0)
+                if buy_qty > 0:
+                    buys += 1
+                elif qty > 0:
+                    buys += 1
+                if sell_qty > 0:
+                    sells += 1
+                elif qty < 0:
+                    sells += 1
+                status = (
+                    "OPEN"
+                    if qty != 0
+                    else ("CLOSED" if (buy_qty or sell_qty or realized) else "FLAT")
+                )
+                opt_raw = str(pos.get("drvOptionType") or "").upper()
+                if opt_raw in {"CALL", "CE", "C"}:
+                    opt = "CE"
+                elif opt_raw in {"PUT", "PE", "P"}:
+                    opt = "PE"
+                else:
+                    opt = None
+                rows.append(
+                    {
+                        "symbol": str(pos.get("tradingSymbol") or token or "—"),
+                        "security_id": str(token) if token is not None else None,
+                        "option_type": opt,
+                        "strike": pos.get("drvStrikePrice"),
+                        "qty": qty,
+                        "entry": entry,
+                        "ltp": None if live is None else round(float(live), 2),
+                        "realized": round(realized, 2),
+                        "unrealized": round(unrealized, 2),
+                        "pnl": round(realized + unrealized, 2),
+                        "status": status,
+                    }
+                )
+        else:
+            from dashboard.components.positions import fetch_positions
+
+            open_rows, _err = fetch_positions(broker, redis_client=redis_client)  # type: ignore[arg-type]
+            for r in open_rows or []:
+                if r.qty > 0:
+                    buys += 1
+                elif r.qty < 0:
+                    sells += 1
+                turnover += abs(float(r.ltp or r.entry_price or 0) * abs(int(r.qty)))
+                rows.append(
+                    {
+                        "symbol": r.symbol,
+                        "security_id": str(r.token) if r.token is not None else None,
+                        "option_type": r.option_type,
+                        "strike": r.strike,
+                        "qty": r.qty,
+                        "entry": r.entry_price,
+                        "ltp": r.ltp,
+                        "realized": 0.0,
+                        "unrealized": float(r.pnl or 0),
+                        "pnl": float(r.pnl or 0),
+                        "status": "OPEN",
+                    }
+                )
+    except Exception:
+        logger.debug("thesis live trade rows failed", exc_info=True)
+    return rows, turnover, max(buys, 0), max(sells, 0)
+
+
 def live_market_tick(
     symbol: str,
     *,
@@ -358,7 +692,7 @@ def live_market_tick(
     redis_client: Any | None = None,
     session_charges_total: float = 0.0,
 ) -> dict[str, Any]:
-    """Live underlying LTP + mark-to-market P&L for the thesis ticker."""
+    """Live underlying + day P&L (realized+unrealized) + executed trade insights."""
     symbol_u = symbol.strip().upper()
     ltp = None
     atm = None
@@ -371,19 +705,105 @@ def live_market_tick(
             atm = chain.get("atm_strike") or chain.get("atm")
             pcr = chain.get("pcr")
             chain_age = chain.get("asof") or chain.get("updated_at")
+            if pcr is None:
+                try:
+                    from services.oi_tracker import compute_pcr
+
+                    call_oi = put_oi = 0
+                    for sides in (chain.get("strikes") or {}).values():
+                        if not isinstance(sides, dict):
+                            continue
+                        ce = (sides.get("CE") or {}).get("oi")
+                        pe = (sides.get("PE") or {}).get("oi")
+                        if ce is not None:
+                            call_oi += int(ce)
+                        if pe is not None:
+                            put_oi += int(pe)
+                    pcr = compute_pcr(call_oi, put_oi)
+                except Exception:
+                    pass
     except Exception:
         logger.debug("thesis live chain failed", exc_info=True)
 
+    realized = 0.0
+    unrealized = 0.0
     gross = None
+    pnl_err = None
     try:
-        from dashboard.components.positions import fetch_positions
+        from services.circuit_breaker import fetch_daily_pnl
 
-        rows, _err = fetch_positions(broker, redis_client=redis_client)  # type: ignore[arg-type]
-        gross = float(sum(r.pnl for r in rows)) if rows else 0.0
+        snap = fetch_daily_pnl(broker if broker in {"dhan", "zerodha"} else "dhan")  # type: ignore[arg-type]
+        if snap.error:
+            pnl_err = snap.error
+        realized = float(snap.realized_pnl or 0)
+        unrealized = float(snap.unrealized_pnl or 0)
+        gross = float(snap.total_pnl)
+    except Exception as exc:
+        logger.debug("thesis daily pnl failed", exc_info=True)
+        pnl_err = str(exc)
+
+    trades, turnover, buys, sells = _live_trade_rows(broker=broker, redis_client=redis_client)
+    orders, fee_legs = _live_order_ledger(broker=broker, redis_client=redis_client)
+
+    # Prefer live fee estimate from today's order ledger; else churn proxy; else thesis model.
+    live_fees = float(session_charges_total or 0)
+    if fee_legs.get("total"):
+        live_fees = float(fee_legs["total"])
+    elif turnover > 0 and (buys + sells) > 0:
+        live_fees = estimate_option_charges(
+            turnover,
+            buy_orders=max(buys, 1),
+            sell_orders=max(sells, 0) or (1 if buys else 0),
+        ).total
+
+    # Enrich open sleeves from day-risk book (planned stop / order id)
+    sleeves: list[dict[str, Any]] = []
+    try:
+        from services.intraday_hunt import load_day_risk
+
+        state = load_day_risk(redis_client)
+        for s in state.get("sleeves") or []:
+            if not isinstance(s, dict):
+                continue
+            sec = s.get("security_id")
+            live = _tick_ltp(redis_client, sec)
+            entry = s.get("ltp")
+            qty = int(s.get("qty") or 0)
+            upnl = None
+            if live is not None and entry is not None and qty:
+                upnl = round((float(live) - float(entry)) * qty, 2)
+            sleeves.append(
+                {
+                    "order_id": s.get("order_id"),
+                    "security_id": sec,
+                    "strike": s.get("strike"),
+                    "option_type": s.get("option_type"),
+                    "qty": qty,
+                    "entry": entry,
+                    "ltp": live,
+                    "stop_price": s.get("stop_price"),
+                    "unrealized": upnl,
+                    "stopped": bool(s.get("stopped")),
+                    "asof": s.get("asof"),
+                }
+            )
     except Exception:
-        logger.debug("thesis live positions failed", exc_info=True)
+        logger.debug("thesis day-risk sleeves failed", exc_info=True)
 
-    nett = nett_pnl(gross, session_charges_total)
+    nett = nett_pnl(gross, live_fees) if gross is not None else None
+    open_n = sum(1 for t in trades if t.get("status") == "OPEN")
+    closed_n = sum(1 for t in trades if t.get("status") == "CLOSED")
+    traded_n = sum(1 for o in orders if int(o.get("filled") or 0) > 0)
+    rejected_n = sum(1 for o in orders if str(o.get("status") or "").upper() == "REJECTED")
+    insight = (
+        f"{traded_n} fills · {open_n} open pos · {closed_n} closed pos · "
+        f"realized ₹{realized:+,.0f} · unrealized ₹{unrealized:+,.0f} · "
+        f"fees ₹{live_fees:,.0f}"
+        + (f" · {rejected_n} rejected" if rejected_n else "")
+    )
+    if not orders and not trades and gross == 0:
+        insight = "No executed day trades yet — capital idle vs target"
+
     return {
         "symbol": symbol_u,
         "underlying_ltp": None if ltp is None else float(ltp),
@@ -391,7 +811,16 @@ def live_market_tick(
         "pcr": pcr,
         "chain_asof": chain_age,
         "gross_pnl": None if gross is None else round(float(gross), 2),
+        "realized_pnl": round(realized, 2),
+        "unrealized_pnl": round(unrealized, 2),
         "nett_pnl": None if nett is None else round(float(nett), 2),
+        "fees_live": round(live_fees, 2),
+        "fee_legs": fee_legs,
+        "trades": trades,
+        "orders": orders,
+        "sleeves": sleeves,
+        "insight": insight,
+        "pnl_error": pnl_err,
         "asof": datetime.now(timezone.utc).isoformat(),
     }
 

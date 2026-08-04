@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +14,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from dashboard.auth import render_sidebar_profile, require_login
+from dashboard.components.console_runtime import session_clock
 from dashboard.secrets_store import apply_secrets_to_environ
 from dashboard.timefmt import format_ist
 from services.live_market_voices import (
@@ -35,6 +37,9 @@ require_login()
 apply_secrets_to_environ()
 render_sidebar_profile()
 
+clock = session_clock()
+live_desk = clock.is_live_desk or clock.phase in {"PRE_OPEN", "OPEN", "CLOSING"}
+
 st.title("Live Market")
 st.caption(
     "Curated voices from regulators, policymakers, Nifty 100 exchange filings, "
@@ -44,6 +49,8 @@ st.caption(
 
 with st.sidebar:
     st.subheader("Live Market")
+    auto_live = st.toggle("Live refresh (market hours)", value=live_desk)
+    tick_sec = st.select_slider("Tick seconds", options=[15, 30, 60], value=30)
     horizon = st.radio(
         "Horizon",
         ["day", "week", "month", "quarter", "year"],
@@ -73,6 +80,23 @@ with st.sidebar:
                 st.error(f"Refresh failed: {exc}")
         st.rerun()
     st.caption("Caches: `data/live_market/`. Failed feeds are listed — never invent filled.")
+
+if auto_live:
+
+    @st.fragment(run_every=timedelta(seconds=int(tick_sec)))
+    def _live_pulse() -> None:
+        c = session_clock()
+        s = load_snapshot()
+        st.caption(
+            f"Live · {c.phase} · {c.now_ist}"
+            + (
+                f" · snapshot {format_ist(s.asof, seconds=True)}"
+                if s
+                else " · no snapshot yet"
+            )
+        )
+
+    _live_pulse()
 
 snap = load_snapshot()
 voices = load_voices()

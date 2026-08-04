@@ -1,9 +1,10 @@
-"""Global outlook data: overseas markers, India proxies, FII/DII, and bias score.
+"""Global outlook data: India/proxies via DhanHQ + NSE FII/DII bias score.
 
-Sources (lowest latency where possible):
-  - DhanHQ charts — NIFTY / BANKNIFTY / INDIA_VIX / GIFTNIFTY / MCX CRUDE & GOLD
-  - Yahoo Finance — US/EU/Asia indices, USDINR, US VIX (overseas tape)
-  - NSE public API — latest FII / DII cash-market flows (appended to local history)
+Sources (paid Dhan subscription — no Yahoo):
+  - DhanHQ charts — NIFTY / BANKNIFTY / SENSEX / INDIA_VIX / GIFTNIFTY
+  - DhanHQ MCX — CRUDEOIL / GOLD futures
+  - DhanHQ NSE Currency — USDINR FUTCUR when a live contract is listed
+  - NSE public API — FII / DII cash-market flows (appended to local history)
 """
 
 from __future__ import annotations
@@ -34,27 +35,64 @@ FII_DII_PATH = GLOBAL_DIR / "fii_dii_daily.parquet"
 MARKERS_PATH = GLOBAL_DIR / "markers_latest.parquet"
 SNAPSHOT_PATH = GLOBAL_DIR / "outlook_snapshot.json"
 
-# Overseas / cross-asset markers via Yahoo (Dhan does not list most of these).
-YAHOO_MARKERS: dict[str, dict[str, str]] = {
-    "SPX": {"ticker": "^GSPC", "name": "S&P 500", "region": "US", "why": "Risk appetite leader for EM / India"},
-    "NASDAQ": {"ticker": "^IXIC", "name": "Nasdaq Composite", "region": "US", "why": "Growth / tech risk sentiment"},
-    "DJI": {"ticker": "^DJI", "name": "Dow Jones", "region": "US", "why": "US industrial / value tone"},
-    "US_VIX": {"ticker": "^VIX", "name": "CBOE VIX", "region": "US", "why": "Global fear gauge; spikes hurt NIFTY"},
-    "NIKKEI": {"ticker": "^N225", "name": "Nikkei 225", "region": "ASIA", "why": "Asia risk-on cue into India open"},
-    "HSI": {"ticker": "^HSI", "name": "Hang Seng", "region": "ASIA", "why": "China/HK risk; correlates with EM Asia"},
-    "FTSE": {"ticker": "^FTSE", "name": "FTSE 100", "region": "EU", "why": "Europe overnight risk tone"},
-    "DAX": {"ticker": "^GDAXI", "name": "DAX", "region": "EU", "why": "Eurozone cyclical tone"},
-    "USDINR": {"ticker": "USDINR=X", "name": "USD / INR", "region": "FX", "why": "INR weakness often weighs on FII flows"},
-    "WTI": {"ticker": "CL=F", "name": "WTI Crude", "region": "CMDTY", "why": "Oil shock → inflation / deficit risk"},
-    "GOLD": {"ticker": "GC=F", "name": "Gold (COMEX)", "region": "CMDTY", "why": "Safe-haven bid when risk-off"},
-}
-
-# India-proximate markers via Dhan (IDX_I / MCX).
+# India / GIFT markers via Dhan (IDX_I / INDEX).
 DHAN_MARKERS: dict[str, dict[str, str]] = {
-    "NIFTY": {"security_id": "13", "segment": "IDX_I", "instrument": "INDEX", "name": "Nifty 50"},
-    "BANKNIFTY": {"security_id": "25", "segment": "IDX_I", "instrument": "INDEX", "name": "Nifty Bank"},
-    "INDIA_VIX": {"security_id": "21", "segment": "IDX_I", "instrument": "INDEX", "name": "India VIX"},
-    "GIFTNIFTY": {"security_id": "5024", "segment": "IDX_I", "instrument": "INDEX", "name": "GIFT Nifty"},
+    "NIFTY": {
+        "security_id": "13",
+        "segment": "IDX_I",
+        "instrument": "INDEX",
+        "name": "Nifty 50",
+        "region": "INDIA",
+        "why": "Domestic cash benchmark",
+    },
+    "BANKNIFTY": {
+        "security_id": "25",
+        "segment": "IDX_I",
+        "instrument": "INDEX",
+        "name": "Nifty Bank",
+        "region": "INDIA",
+        "why": "Financials / rate-sensitivity proxy",
+    },
+    "FINNIFTY": {
+        "security_id": "27",
+        "segment": "IDX_I",
+        "instrument": "INDEX",
+        "name": "Nifty Fin Service",
+        "region": "INDIA",
+        "why": "Broader financials tape",
+    },
+    "SENSEX": {
+        "security_id": "51",
+        "segment": "IDX_I",
+        "instrument": "INDEX",
+        "name": "Sensex",
+        "region": "INDIA",
+        "why": "BSE broad market — India risk appetite",
+    },
+    "BANKEX": {
+        "security_id": "69",
+        "segment": "IDX_I",
+        "instrument": "INDEX",
+        "name": "BSE Bankex",
+        "region": "INDIA",
+        "why": "BSE banks — corroborates Bank Nifty",
+    },
+    "INDIA_VIX": {
+        "security_id": "21",
+        "segment": "IDX_I",
+        "instrument": "INDEX",
+        "name": "India VIX",
+        "region": "INDIA",
+        "why": "India implied vol; elevated → fragile bids",
+    },
+    "GIFTNIFTY": {
+        "security_id": "5024",
+        "segment": "IDX_I",
+        "instrument": "INDEX",
+        "name": "GIFT Nifty",
+        "region": "ASIA",
+        "why": "Near-24x7 SGX/GIFT cue into cash open (Dhan overnight proxy)",
+    },
 }
 
 
@@ -140,6 +178,34 @@ def resolve_mcx_fut(symbol_name: str) -> tuple[str, str] | None:
     return str(int(row["SECURITY_ID"])), str(row.get("DISPLAY_NAME") or symbol_name)
 
 
+def resolve_usdinr_fut() -> tuple[str, str] | None:
+    """Nearest live USDINR FUTCUR on NSE Currency (monthly preferred)."""
+    headers = {k: v for k, v in dhan_headers().items() if k != "Content-Type"}
+    r = requests.get("https://api.dhan.co/v2/instrument/NSE_CURRENCY", headers=headers, timeout=120)
+    r.raise_for_status()
+    import io
+
+    df = pd.read_csv(io.BytesIO(r.content), low_memory=False)
+    m = df[
+        (df["INSTRUMENT"] == "FUTCUR")
+        & (df["UNDERLYING_SYMBOL"].astype(str).str.upper() == "USDINR")
+    ].copy()
+    if m.empty:
+        return None
+    m["exp"] = m["SM_EXPIRY_DATE"].astype(str).str[:10]
+    live = m[m["exp"] >= date.today().isoformat()].copy()
+    if live.empty:
+        return None
+    # Prefer monthly contracts when available
+    if "EXPIRY_FLAG" in live.columns:
+        monthly = live[live["EXPIRY_FLAG"].astype(str) == "M"]
+        pool = monthly if not monthly.empty else live
+    else:
+        pool = live
+    row = pool.sort_values("exp").iloc[0]
+    return str(int(row["SECURITY_ID"])), str(row.get("DISPLAY_NAME") or "USDINR FUT")
+
+
 def fetch_dhan_mcx_recent(symbol_name: str, label: str, *, days: int = 40) -> pd.DataFrame:
     resolved = resolve_mcx_fut(symbol_name)
     if not resolved:
@@ -166,28 +232,81 @@ def fetch_dhan_mcx_recent(symbol_name: str, label: str, *, days: int = 40) -> pd
     return _candles_to_frame(data, symbol=label)
 
 
-def fetch_yahoo_recent(ticker: str, *, period: str = "3mo") -> pd.DataFrame:
-    import yfinance as yf
+def fetch_dhan_currency_recent(label: str = "USDINR", *, days: int = 40) -> pd.DataFrame:
+    resolved = resolve_usdinr_fut()
+    if not resolved:
+        raise RuntimeError("No live USDINR FUTCUR on Dhan instrument master")
+    sid, display = resolved
+    end = date.today() + timedelta(days=1)
+    start = date.today() - timedelta(days=days + 10)
+    payload = {
+        "securityId": sid,
+        "exchangeSegment": "NSE_CURRENCY",
+        "instrument": "FUTCUR",
+        "expiryCode": 0,
+        "oi": False,
+        "fromDate": start.isoformat(),
+        "toDate": end.isoformat(),
+    }
+    resp = requests.post(DHAN_HIST_URL, headers=dhan_headers(), json=payload, timeout=45)
+    if resp.status_code != 200:
+        # Fallback: LTP-only quote (no history) so the desk still sees a print
+        quote = _dhan_ltp("NSE_CURRENCY", int(sid))
+        if quote is None:
+            raise RuntimeError(
+                f"Dhan USDINR HTTP {resp.status_code}: {resp.text[:160]} ({display})"
+            )
+        now = datetime.now(timezone.utc)
+        return pd.DataFrame(
+            [
+                {
+                    "time": now - timedelta(days=1),
+                    "symbol": label,
+                    "open": quote,
+                    "high": quote,
+                    "low": quote,
+                    "close": quote,
+                    "volume": 0,
+                },
+                {
+                    "time": now,
+                    "symbol": label,
+                    "open": quote,
+                    "high": quote,
+                    "low": quote,
+                    "close": quote,
+                    "volume": 0,
+                },
+            ]
+        )
+    data = resp.json()
+    if not isinstance(data, dict) or "close" not in data:
+        raise RuntimeError(f"Dhan USDINR bad payload ({display})")
+    time.sleep(0.35)
+    return _candles_to_frame(data, symbol=label)
 
-    df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["time", "symbol", "open", "high", "low", "close", "volume"])
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    df = df.reset_index()
-    time_col = "Date" if "Date" in df.columns else df.columns[0]
-    out = pd.DataFrame(
-        {
-            "time": pd.to_datetime(df[time_col], utc=True),
-            "symbol": ticker,
-            "open": df.get("Open"),
-            "high": df.get("High"),
-            "low": df.get("Low"),
-            "close": df.get("Close"),
-            "volume": df.get("Volume", 0),
-        }
-    )
-    return out.dropna(subset=["close"]).reset_index(drop=True)
+
+def _dhan_ltp(segment: str, security_id: int) -> float | None:
+    try:
+        resp = requests.post(
+            "https://api.dhan.co/v2/marketfeed/ltp",
+            headers=dhan_headers(),
+            json={segment: [int(security_id)]},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json().get("data") or {}
+        bucket = data.get(segment) or {}
+        row = bucket.get(str(security_id)) or bucket.get(security_id) or {}
+        if isinstance(row, dict):
+            for key in ("last_price", "LTP", "ltp", "lastPrice"):
+                if row.get(key) is not None:
+                    return float(row[key])
+        return None
+    except Exception:
+        logger.debug("Dhan LTP %s/%s failed", segment, security_id, exc_info=True)
+        return None
 
 
 def fetch_nse_fii_dii() -> list[dict[str, Any]]:
@@ -263,27 +382,22 @@ def _marker_from_frame(
 def collect_markers() -> list[MarkerRow]:
     rows: list[MarkerRow] = []
 
-    # Prefer long Dhan history files when present for India indices.
     for symbol, meta in DHAN_MARKERS.items():
-        why = {
-            "NIFTY": "Domestic benchmark",
-            "BANKNIFTY": "Financials / rate-sensitivity proxy",
-            "INDIA_VIX": "India implied vol; elevated → fragile bids",
-            "GIFTNIFTY": "Near-24x7 SGX/GIFT cue into cash open",
-        }.get(symbol, "")
+        why = str(meta.get("why") or "")
+        region = str(meta.get("region") or "INDIA")
         try:
             hist = HISTORY_DIR / f"{symbol.lower()}_daily.parquet"
-            if symbol == "GIFTNIFTY" or not hist.is_file():
+            if symbol in {"GIFTNIFTY", "SENSEX", "BANKEX", "FINNIFTY"} or not hist.is_file():
                 frame = fetch_dhan_recent(symbol, days=60)
             else:
                 frame = pd.read_parquet(hist)
             rows.append(
-                _marker_from_frame(symbol, meta["name"], "INDIA", "dhan", frame, why)
+                _marker_from_frame(symbol, meta["name"], region, "dhan", frame, why)
             )
         except Exception as exc:
             logger.warning("Dhan marker %s failed: %s", symbol, exc)
             rows.append(
-                MarkerRow(symbol, meta["name"], "INDIA", "dhan", None, None, None, "", why)
+                MarkerRow(symbol, meta["name"], region, "dhan", None, None, None, "", why)
             )
 
     # MCX crude / gold via Dhan
@@ -298,36 +412,38 @@ def collect_markers() -> list[MarkerRow]:
             )
         except Exception as exc:
             logger.warning("MCX %s failed: %s", sym_name, exc)
+            rows.append(
+                MarkerRow(label, f"{sym_name} (MCX)", "CMDTY", "dhan", None, None, None, "", why)
+            )
 
-    # Overseas Yahoo markers
-    for symbol, meta in YAHOO_MARKERS.items():
-        try:
-            frame = fetch_yahoo_recent(meta["ticker"])
-            rows.append(
-                _marker_from_frame(
-                    symbol,
-                    meta["name"],
-                    meta["region"],
-                    "yahoo",
-                    frame,
-                    meta["why"],
-                )
+    # USDINR via Dhan NSE Currency (when a live FUTCUR exists)
+    try:
+        frame = fetch_dhan_currency_recent("USDINR")
+        rows.append(
+            _marker_from_frame(
+                "USDINR",
+                "USDINR FUT (NSE)",
+                "FX",
+                "dhan",
+                frame,
+                "INR weakness often weighs on FII flows",
             )
-        except Exception as exc:
-            logger.warning("Yahoo %s failed: %s", symbol, exc)
-            rows.append(
-                MarkerRow(
-                    symbol,
-                    meta["name"],
-                    meta["region"],
-                    "yahoo",
-                    None,
-                    None,
-                    None,
-                    "",
-                    meta["why"],
-                )
+        )
+    except Exception as exc:
+        logger.warning("Dhan USDINR failed: %s", exc)
+        rows.append(
+            MarkerRow(
+                "USDINR",
+                "USDINR FUT (NSE)",
+                "FX",
+                "dhan",
+                None,
+                None,
+                None,
+                "",
+                "No live USDINR FUTCUR on Dhan master right now",
             )
+        )
 
     return rows
 
@@ -352,9 +468,7 @@ def compute_outlook(
             return
         up = m.change_pct > 0
         bullish = up if bull_if_up else (not up)
-        # VIX-style inverted
         signed = m.change_pct if bull_if_up else -m.change_pct
-        # Soft clip contribution
         contrib = max(-weight, min(weight, signed / 1.5 * weight))
         score += contrib
         signal = "bullish" if bullish else "bearish"
@@ -370,16 +484,15 @@ def compute_outlook(
             )
         )
 
-    add("SPX", "US S&P overnight", 1.2)
-    add("NASDAQ", "US Nasdaq overnight", 1.0)
-    add("US_VIX", "US VIX (invert)", 1.1, bull_if_up=False)
-    add("NIKKEI", "Nikkei", 0.8)
-    add("HSI", "Hang Seng", 0.7)
+    # Dhan-only factor board (GIFT stands in for overseas overnight tone)
+    add("GIFTNIFTY", "GIFT Nifty overnight", 1.4)
+    add("NIFTY", "Nifty 50", 1.1)
+    add("SENSEX", "Sensex", 0.9)
+    add("BANKNIFTY", "Bank Nifty", 1.0)
+    add("INDIA_VIX", "India VIX (invert)", 1.2, bull_if_up=False)
     add("USDINR", "USDINR (invert)", 1.0, bull_if_up=False)
-    add("WTI", "Crude (invert mild)", 0.6, bull_if_up=False)
-    add("INDIA_VIX", "India VIX (invert)", 1.0, bull_if_up=False)
-    add("GIFTNIFTY", "GIFT Nifty", 1.3)
-    add("MCX_CRUDE", "MCX Crude (invert mild)", 0.5, bull_if_up=False)
+    add("MCX_CRUDE", "MCX Crude (invert mild)", 0.7, bull_if_up=False)
+    add("MCX_GOLD", "MCX Gold (safe-haven)", 0.5, bull_if_up=False)
 
     # GIFT premium/discount vs NIFTY cash
     gift = by.get("GIFTNIFTY")

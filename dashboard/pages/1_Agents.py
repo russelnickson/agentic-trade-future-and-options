@@ -69,13 +69,15 @@ clock = session_clock()
 st.title("Agents")
 st.caption(
     f"{clock.phase} · {clock.label} — Scout, Voices, Research, and Risk debate facts; "
-    "**Trade** decides so the day can close decent."
+    "**Trade** decides so the day can close decent. "
+    "Prefer **Agentic Trade** for the full chat + operator replies."
 )
 
+live_desk = clock.is_live_desk or clock.phase in {"PRE_OPEN", "OPEN", "CLOSING"}
 with st.sidebar:
     st.subheader("Agents")
-    auto = st.toggle("Auto-refresh", value=True)
-    refresh_sec = st.select_slider("Interval", options=[2, 5, 10, 30], value=5)
+    auto = st.toggle("Live refresh (market hours)", value=live_desk)
+    refresh_sec = st.select_slider("Interval", options=[2, 5, 10, 30], value=5 if live_desk else 10)
     limit = st.slider("Rows", min_value=20, max_value=300, value=100, step=10)
     if st.button("Seed sample session", use_container_width=True):
         seed_sample_session(client)

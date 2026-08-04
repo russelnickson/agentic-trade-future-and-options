@@ -15,7 +15,7 @@ if str(_ROOT) not in sys.path:
 
 from dashboard.auth import render_sidebar_profile, require_login
 from dashboard.components.capital import fetch_capital
-from dashboard.components.console_runtime import classify_day_outcome
+from dashboard.components.console_runtime import classify_day_outcome, session_clock
 from dashboard.components.positions import fetch_positions
 from dashboard.secrets_store import apply_secrets_to_environ
 from dashboard.timefmt import format_ist
@@ -62,15 +62,19 @@ client = _redis()
 
 st.title("Thesis")
 st.caption(
-    "Live **target profit vs achieved** (nett of charges) — "
+    "Live **target vs achieved nett P&L after brokerage, SEBI, STT, GST, stamp & exchange** — "
     "priority **PHENOMENAL → OKAY → FLAT → ACCEPTABLE_LOSS → BREACH**, ticking with the market."
 )
+
+clock = session_clock()
+live_desk = clock.is_live_desk or clock.phase in {"PRE_OPEN", "OPEN", "CLOSING"}
 
 with st.sidebar:
     st.subheader("Thesis")
     symbol = st.selectbox("Underlying", ["NIFTY", "BANKNIFTY", "FINNIFTY"])
     broker = st.selectbox("Broker (P&L / capital)", ["dhan", "zerodha"])
-    refresh_sec = st.select_slider("Live tick (sec)", options=[2, 5, 10, 30], value=5)
+    auto_live = st.toggle("Live refresh (market hours)", value=live_desk)
+    refresh_sec = st.select_slider("Live tick (sec)", options=[2, 5, 10, 30], value=5 if live_desk else 30)
     turnover = st.number_input(
         "Premium turnover proxy (₹)",
         min_value=0.0,
@@ -117,8 +121,7 @@ fee_total = float(charges.get("total") or 0)
 capital_ref = float(thesis.get("capital_ref") or 0)
 
 
-@st.fragment(run_every=timedelta(seconds=int(refresh_sec)))
-def live_ticker() -> None:
+def _render_ticker() -> None:
     tick = live_market_tick(
         symbol,
         broker=broker,
@@ -127,6 +130,9 @@ def live_ticker() -> None:
     )
     achieved_gross = tick.get("gross_pnl")
     achieved_nett = tick.get("nett_pnl")
+    realized = tick.get("realized_pnl")
+    unrealized = tick.get("unrealized_pnl")
+    fees_live = float(tick.get("fees_live") or fee_total or 0)
     gap, progress = progress_to_target(achieved_nett, target_nett)
     live_grade = classify_day_outcome(
         achieved_nett,
@@ -137,15 +143,18 @@ def live_ticker() -> None:
     ltp_s = "—" if ltp is None else f"{ltp:,.2f}"
 
     st.markdown("### Live ticker")
-    t1, t2, t3, t4, t5 = st.columns([1.2, 1, 1, 1, 1])
+    t1, t2, t3, t4, t5, t6 = st.columns([1.1, 1, 1, 0.9, 0.9, 1])
     t1.metric(f"{symbol} LTP", ltp_s)
     t2.metric(
         "Day target (nett)",
         f"₹{target_nett:+,.0f}",
-        help=f"Enter **{primary}** after fees · gross ≈ ₹{target_gross:+,.0f}",
+        help=(
+            f"Enter **{primary}** after brokerage+SEBI+STT+GST · "
+            f"gross ≈ ₹{target_gross:+,.0f}"
+        ),
     )
     t3.metric(
-        "Achieved (nett)",
+        "Achieved nett (after fees)",
         "—" if achieved_nett is None else f"₹{achieved_nett:+,.0f}",
         delta=(
             None
@@ -155,10 +164,14 @@ def live_ticker() -> None:
         delta_color="inverse" if (gap or 0) > 0 else "normal",
     )
     t4.metric(
-        "Achieved (gross)",
-        "—" if achieved_gross is None else f"₹{achieved_gross:+,.0f}",
+        "Realized",
+        "—" if realized is None else f"₹{float(realized):+,.0f}",
     )
-    t5.markdown(
+    t5.metric(
+        "Unrealized",
+        "—" if unrealized is None else f"₹{float(unrealized):+,.0f}",
+    )
+    t6.markdown(
         f"<div style='padding:0.65rem;border-radius:8px;background:{color}22;"
         f"border:1px solid {color}'><div style='font-size:0.7rem;color:#6B7280'>"
         f"Live grade</div><div style='font-size:1.25rem;font-weight:700;color:{color}'>"
@@ -169,16 +182,209 @@ def live_ticker() -> None:
     pct = 0.0 if progress is None else min(float(progress), 150.0)
     st.progress(min(pct / 100.0, 1.0), text=f"Progress to day target · {pct:.0f}%")
 
+    insight = tick.get("insight") or ""
+    st.info(insight)
+
+    orders = list(tick.get("orders") or [])
+    trades = list(tick.get("trades") or [])
+    sleeves = list(tick.get("sleeves") or [])
+    fee_legs = tick.get("fee_legs") or {}
+
+    if orders or trades or sleeves:
+        st.markdown("#### Executed trades (live)")
+        if orders:
+            order_rows = []
+            for o in orders:
+                flow = o.get("premium_flow")
+                fees = o.get("fees")
+                order_rows.append(
+                    {
+                        "Time": o.get("time") or "—",
+                        "Order": str(o.get("order_id") or "")[-8:],
+                        "Status": o.get("status"),
+                        "Side": o.get("side"),
+                        "Contract": o.get("symbol"),
+                        "Opt": o.get("option_type") or "—",
+                        "Strike": o.get("strike"),
+                        "Filled": o.get("filled"),
+                        "Avg": o.get("avg"),
+                        "Premium flow": flow,
+                        "Brokerage": o.get("brokerage"),
+                        "STT": o.get("stt"),
+                        "Exch": o.get("exchange"),
+                        "SEBI": o.get("sebi"),
+                        "Stamp": o.get("stamp"),
+                        "GST": o.get("gst"),
+                        "Fees": fees,
+                        "Tag": o.get("tag") or "—",
+                        "Reason": o.get("reason") or "—",
+                    }
+                )
+            odf = pd.DataFrame(order_rows)
+
+            def _style_orders(df: pd.DataFrame):
+                styles = pd.DataFrame("", index=df.index, columns=df.columns)
+
+                def _pnl_color(val: object) -> str:
+                    try:
+                        num = float(val)  # type: ignore[arg-type]
+                    except (TypeError, ValueError):
+                        return ""
+                    if num > 0:
+                        return "color: #0a7a32; font-weight: 600"
+                    if num < 0:
+                        return "color: #c62828; font-weight: 600"
+                    return "color: #666666"
+
+                def _side_color(val: object) -> str:
+                    text = str(val or "").upper()
+                    if text == "BUY":
+                        return "color: #0a7a32; font-weight: 600"
+                    if text == "SELL":
+                        return "color: #c62828; font-weight: 600"
+                    return ""
+
+                def _status_color(val: object) -> str:
+                    text = str(val or "").upper()
+                    if text in {"TRADED", "COMPLETE", "FILLED"}:
+                        return "color: #0a7a32; font-weight: 600"
+                    if text in {"REJECTED", "CANCELLED"}:
+                        return "color: #c62828; font-weight: 600"
+                    if text in {"PENDING", "TRANSIT", "OPEN"}:
+                        return "color: #b26a00; font-weight: 600"
+                    return ""
+
+                if "Premium flow" in df.columns:
+                    styles["Premium flow"] = df["Premium flow"].map(_pnl_color)
+                if "Fees" in df.columns:
+                    styles["Fees"] = df["Fees"].map(
+                        lambda v: "color: #c62828" if float(v or 0) > 0 else ""
+                    )
+                if "Side" in df.columns:
+                    styles["Side"] = df["Side"].map(_side_color)
+                if "Status" in df.columns:
+                    styles["Status"] = df["Status"].map(_status_color)
+                return styles
+
+            st.dataframe(
+                odf.style.apply(_style_orders, axis=None).format(
+                    {
+                        "Avg": "{:.2f}",
+                        "Premium flow": "{:+.2f}",
+                        "Brokerage": "{:.2f}",
+                        "STT": "{:.2f}",
+                        "Exch": "{:.2f}",
+                        "SEBI": "{:.2f}",
+                        "Stamp": "{:.2f}",
+                        "GST": "{:.2f}",
+                        "Fees": "{:.2f}",
+                    },
+                    na_rep="—",
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=min(420, 48 + 36 * max(len(odf), 1)),
+            )
+            if fee_legs:
+                f1, f2, f3, f4, f5, f6, f7 = st.columns(7)
+                f1.metric("Brokerage", f"₹{float(fee_legs.get('brokerage') or 0):,.2f}")
+                f2.metric("STT", f"₹{float(fee_legs.get('stt') or 0):,.2f}")
+                f3.metric("Exchange", f"₹{float(fee_legs.get('exchange') or 0):,.2f}")
+                f4.metric("SEBI", f"₹{float(fee_legs.get('sebi') or 0):,.2f}")
+                f5.metric("Stamp", f"₹{float(fee_legs.get('stamp') or 0):,.2f}")
+                f6.metric("GST", f"₹{float(fee_legs.get('gst') or 0):,.2f}")
+                f7.metric("Fees total", f"₹{float(fee_legs.get('total') or 0):,.2f}")
+            st.caption(
+                "Premium flow: SELL credits green · BUY debits red. "
+                "Fees are NSE options proxies (brokerage+STT+exchange+SEBI+stamp+GST). "
+                "Reason maps hunt / TP / trail / stop tags + sleeve book."
+            )
+
+        if trades:
+            with st.expander("Position roll-up (net by contract)", expanded=False):
+                pos_rows = []
+                for t in trades:
+                    pos_rows.append(
+                        {
+                            "Status": t.get("status"),
+                            "Contract": t.get("symbol"),
+                            "Side": t.get("option_type") or "—",
+                            "Strike": t.get("strike"),
+                            "Net qty": t.get("qty"),
+                            "Entry": t.get("entry"),
+                            "LTP": t.get("ltp"),
+                            "Realized": t.get("realized"),
+                            "Unrealized": t.get("unrealized"),
+                            "P&L": t.get("pnl"),
+                        }
+                    )
+                pdf = pd.DataFrame(pos_rows)
+
+                def _style_pos(df: pd.DataFrame):
+                    styles = pd.DataFrame("", index=df.index, columns=df.columns)
+
+                    def _c(val: object) -> str:
+                        try:
+                            num = float(val)  # type: ignore[arg-type]
+                        except (TypeError, ValueError):
+                            return ""
+                        if num > 0:
+                            return "color: #0a7a32; font-weight: 600"
+                        if num < 0:
+                            return "color: #c62828; font-weight: 600"
+                        return ""
+
+                    for col in ("Realized", "Unrealized", "P&L"):
+                        if col in df.columns:
+                            styles[col] = df[col].map(_c)
+                    return styles
+
+                st.dataframe(
+                    pdf.style.apply(_style_pos, axis=None).format(
+                        {
+                            "Entry": "{:.2f}",
+                            "LTP": "{:.2f}",
+                            "Realized": "{:+.2f}",
+                            "Unrealized": "{:+.2f}",
+                            "P&L": "{:+.2f}",
+                        },
+                        na_rep="—",
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        if sleeves:
+            with st.expander("Tactical sleeves / stops / targets", expanded=False):
+                st.dataframe(pd.DataFrame(sleeves), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No day trades booked yet — waiting for tactical fills.")
+
     pcr = tick.get("pcr")
     atm = tick.get("atm")
+    err = tick.get("pnl_error")
     st.caption(
-        f"Chase **{primary}** · fees in model ₹{fee_total:,.2f} · "
+        f"Chase **{primary}** · gross ₹"
+        f"{'—' if achieved_gross is None else f'{achieved_gross:+,.0f}'} · "
+        f"nett after fees ₹"
+        f"{'—' if achieved_nett is None else f'{achieved_nett:+,.0f}'} · "
+        f"live fees ₹{fees_live:,.2f} "
+        f"(brokerage+SEBI+STT+exchange+stamp+GST) · "
         f"ATM {atm or '—'} · PCR {f'{pcr:.3f}' if isinstance(pcr, (int, float)) else '—'} · "
         f"tick {format_ist(tick.get('asof'))}"
+        + (f" · pnl warn: {err}" if err else "")
     )
 
 
-live_ticker()
+if auto_live:
+
+    @st.fragment(run_every=timedelta(seconds=int(refresh_sec)))
+    def live_ticker() -> None:
+        _render_ticker()
+
+    live_ticker()
+else:
+    _render_ticker()
 
 st.divider()
 st.markdown("### Consolidation")

@@ -35,7 +35,12 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def paper_trading_enabled() -> bool:
-    return _env_bool("PAPER_TRADING", default=False)
+    try:
+        from config.runtime_mode import paper_trading_enabled as _mode_paper
+
+        return bool(_mode_paper())
+    except Exception:
+        return _env_bool("PAPER_TRADING", default=False)
 
 
 def resolve_broker_name() -> BrokerName:

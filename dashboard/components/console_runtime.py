@@ -575,6 +575,71 @@ def _compose_trade_decision(
         "max_sleeves": budget["max_sleeves"],
     }
 
+    # Live manage open sleeves toward take-profit / trail (tactical owns exits)
+    open_manage: list[dict[str, Any]] = []
+    try:
+        from services.intraday_hunt import load_day_risk, open_sleeves
+
+        for s in open_sleeves(load_day_risk(client)):
+            entry = float(s.get("entry_ltp") or s.get("ltp") or 0)
+            last = s.get("last_ltp")
+            pct = s.get("unrealized_pct")
+            open_manage.append(
+                {
+                    "security_id": s.get("security_id"),
+                    "option_type": s.get("option_type"),
+                    "strike": s.get("strike"),
+                    "qty": s.get("qty"),
+                    "entry": entry or None,
+                    "ltp": last,
+                    "stop": s.get("stop_price"),
+                    "target": s.get("target_price"),
+                    "peak": s.get("peak_ltp"),
+                    "trail_armed": bool(s.get("trail_armed")),
+                    "unrealized_pct": pct,
+                }
+            )
+    except Exception:
+        open_manage = []
+    if open_manage:
+        meta_base["open_sleeves"] = open_manage
+        bits = []
+        for m in open_manage[:3]:
+            side = m.get("option_type") or "?"
+            strike = m.get("strike") or "?"
+            pct = m.get("unrealized_pct")
+            tgt = m.get("target")
+            stop = m.get("stop")
+            trail = " trail✓" if m.get("trail_armed") else ""
+            bits.append(
+                f"{int(strike) if isinstance(strike, (int, float)) else strike}{side}"
+                f"{'' if pct is None else f' {float(pct):+.1f}%'}"
+                f"{'' if tgt is None else f' →tp {tgt}'}"
+                f"{'' if stop is None else f' stop {stop}'}"
+                f"{trail}"
+            )
+        return (
+            "Trade: MANAGE — tactical owns exits (TP ~+28% / trail arm ~+15%). "
+            "Console stance only — not a broker order. "
+            + " · ".join(bits),
+            {
+                "kind": "MANAGE",
+                "summary": (
+                    f"MANAGE — {len(open_manage)} open · "
+                    + " · ".join(bits)
+                    + " · tactical watching"
+                )[:240],
+                "rationale": (
+                    f"{rationale} · Execution owner=tactical_executor; "
+                    "exit only on take-profit, trail stop, or hard stop — "
+                    "MANAGE rows are live monitoring, not pending orders."
+                ),
+                "confidence": 0.82,
+                "status": "ACTIVE",
+                "meta": meta_base,
+            },
+        )
+
     # Prefer LangGraph strategic directive when fresh
     try:
         from services.strategic_controller.directive import load_directive
@@ -659,16 +724,20 @@ def _compose_trade_decision(
     if not budget["can_hunt"]:
         return (
             "Trade: day-loss sleeve budget utilised — MANAGE open risk toward decent close "
-            f"({day.grade}). Deployed ₹{budget['deployed_risk']:,.0f} / cap ₹{budget['util_cap']:,.0f}.",
+            f"({day.grade}). Deployed ₹{budget['deployed_risk']:,.0f} / cap ₹{budget['util_cap']:,.0f}. "
+            "Tactical still owns stops/TP; console is not placing exits here.",
             {
                 "kind": "MANAGE",
                 "summary": (
                     f"MANAGE — risk budget {budget['deployed_risk']:.0f}/{budget['util_cap']:.0f} "
-                    f"· sleeves {budget['sleeves']}/{budget['max_sleeves']}"
+                    f"· sleeves {budget['sleeves']}/{budget['max_sleeves']} · tactical watching"
                 )[:240],
-                "rationale": rationale,
+                "rationale": (
+                    f"{rationale} · Budget full — no new ENTRY; "
+                    "open risk managed by tactical_executor."
+                ),
                 "confidence": 0.8,
-                "status": "PROPOSED",
+                "status": "ACTIVE",
                 "meta": {**meta_base, "entry_lock": lock_st.get("lock")},
             },
         )
@@ -734,7 +803,7 @@ def _compose_trade_decision(
         f"{int(plan['strike'])}{plan['option_type']} @~{plan['ltp']:.2f} · "
         f"risk ₹{float(sizing.get('planned_risk') or 0):,.0f} "
         f"({float(sizing.get('sleeve_weight') or 0):.0%} of day loss) · "
-        f"stop ~{plan.get('stop_price')}"
+        f"stop ~{plan.get('stop_price')} · tp ~{plan.get('target_price')}"
     )
     msg = (
         f"Trade: EXECUTE sized sleeve (not all-in) — {summary}. "
@@ -756,6 +825,7 @@ def _compose_trade_decision(
             "lots",
             "reason",
             "stop_price",
+            "target_price",
             "sizing",
         )
         if k in plan
